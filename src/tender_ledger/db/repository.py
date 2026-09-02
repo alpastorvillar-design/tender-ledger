@@ -1,0 +1,332 @@
+"""Capture lifecycle against PostgreSQL: begin, load batches, reconcile, publish.
+
+Invariants this module enforces:
+
+* A capture's identity is persisted before any notice row is written, and a retry
+  of the same artifact reuses it. An intentional re-acquisition is a new capture,
+  even when the bytes are identical (A -> B -> A keeps three captures).
+* A batch commits its notice rows and its ``capture_batch`` record together.
+* Readers keep seeing the previously published capture until ``publish`` swaps the
+  pointer in a single transaction.
+* Concurrent captures of the same source package are serialized by a session
+  advisory lock; a failed publish transaction changes nothing.
+"""
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+
+import psycopg
+
+from ..projection import CONTRACT_VERSION, ProjectedNotice
+
+_NOTICE_COLUMNS = (
+    "capture_id", "publication_year", "publication_number", "batch_ordinal",
+    "source_format", "schema_version", "source_filename", "notice_uuid",
+    "notice_version", "publication_date", "publication_date_raw", "dispatch_date",
+    "dispatch_date_raw", "buyer_country", "buyer_country_iso", "buyer_country_status",
+    "primary_cpv", "primary_cpv_status", "additional_cpv",
+)
+
+
+class CaptureError(RuntimeError):
+    """A capture cannot proceed as requested."""
+
+
+class ConcurrentCaptureError(CaptureError):
+    def __init__(self, source_package_id: str):
+        super().__init__(f"another capture of {source_package_id!r} is in progress")
+        self.source_package_id = source_package_id
+
+
+class CaptureNotReady(CaptureError):
+    """publish() was called on a capture that has not reconciled."""
+
+
+@dataclass(frozen=True)
+class Capture:
+    capture_id: int
+    source_package_id: str
+    acquisition_ordinal: int
+    artifact_sha256: str
+    contract_version: str
+    status: str
+
+
+@dataclass(frozen=True)
+class BeginResult:
+    capture: Capture
+    resumed: bool
+    already_complete: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    ok: bool
+    loaded_row_count: int
+    member_count: int
+    distinct_notice_count: int
+
+
+def _lock_key_sql(column: str) -> str:
+    return f"hashtext({column})::int8"
+
+
+def _acquire_lock(conn: psycopg.Connection, source_package_id: str, wait: bool) -> bool:
+    if wait:
+        conn.execute("set lock_timeout = '30s'")
+        conn.execute(
+            f"select pg_advisory_lock({_lock_key_sql('%s')})", (source_package_id,)
+        )
+        conn.commit()
+        return True
+    got = conn.execute(
+        f"select pg_try_advisory_lock({_lock_key_sql('%s')})", (source_package_id,)
+    ).fetchone()[0]
+    conn.commit()
+    return bool(got)
+
+
+def release_lock(conn: psycopg.Connection, source_package_id: str) -> None:
+    conn.execute(
+        f"select pg_advisory_unlock({_lock_key_sql('%s')})", (source_package_id,)
+    )
+    conn.commit()
+
+
+def _load_capture(conn: psycopg.Connection, capture_id: int) -> Capture:
+    row = conn.execute(
+        "select capture_id, source_package_id, acquisition_ordinal, artifact_sha256,"
+        " contract_version, status from tl_work.capture where capture_id = %s",
+        (capture_id,),
+    ).fetchone()
+    if row is None:
+        raise CaptureError(f"capture {capture_id} does not exist")
+    return Capture(*row)
+
+
+def begin_capture(
+    conn: psycopg.Connection,
+    source_package_id: str,
+    artifact_sha256: str,
+    artifact_bytes: int,
+    *,
+    contract_version: str = CONTRACT_VERSION,
+    lock_wait: bool = False,
+) -> BeginResult:
+    """Persist (or resume) a capture identity for one source package.
+
+    Resumes an existing ``acquiring``/``loading`` capture only when the artifact
+    checksum and contract version match. Any other case is a new capture.
+    """
+    if not _acquire_lock(conn, source_package_id, lock_wait):
+        raise ConcurrentCaptureError(source_package_id)
+
+    # Idempotent replay: this exact artifact is already the published capture for
+    # the package, so there is nothing to do. A superseded or failed capture with
+    # the same bytes does not count here -- re-acquiring it is a new capture, so
+    # A -> B -> A keeps three.
+    current = conn.execute(
+        "select c.capture_id from tl_work.capture c"
+        " join tl_work.published_capture p on p.capture_id = c.capture_id"
+        " where c.source_package_id = %s and c.artifact_sha256 = %s"
+        "   and c.contract_version = %s and c.status = 'published'",
+        (source_package_id, artifact_sha256, contract_version),
+    ).fetchone()
+    if current is not None:
+        conn.commit()
+        return BeginResult(
+            capture=_load_capture(conn, current[0]), resumed=True, already_complete=True
+        )
+
+    resumable = conn.execute(
+        "select capture_id from tl_work.capture"
+        " where source_package_id = %s and artifact_sha256 = %s"
+        "   and contract_version = %s and status in ('acquiring', 'loading')"
+        " order by capture_id desc limit 1",
+        (source_package_id, artifact_sha256, contract_version),
+    ).fetchone()
+    if resumable is not None:
+        conn.commit()
+        return BeginResult(capture=_load_capture(conn, resumable[0]), resumed=True)
+
+    capture_id = conn.execute(
+        "insert into tl_work.capture"
+        " (source_package_id, artifact_sha256, artifact_bytes, contract_version)"
+        " values (%s, %s, %s, %s) returning capture_id",
+        (source_package_id, artifact_sha256, artifact_bytes, contract_version),
+    ).fetchone()[0]
+    conn.commit()
+    return BeginResult(capture=_load_capture(conn, capture_id), resumed=False)
+
+
+def committed_batches(conn: psycopg.Connection, capture_id: int) -> set[int]:
+    return {
+        r[0]
+        for r in conn.execute(
+            "select batch_ordinal from tl_work.capture_batch where capture_id = %s",
+            (capture_id,),
+        )
+    }
+
+
+def clear_uncommitted_rows(conn: psycopg.Connection, capture_id: int) -> int:
+    """Drop notice rows whose batch never committed (defensive; batches are atomic)."""
+    with conn.transaction():
+        deleted = conn.execute(
+            "delete from tl_work.notice_capture n where n.capture_id = %s"
+            " and not exists (select 1 from tl_work.capture_batch b"
+            "   where b.capture_id = n.capture_id and b.batch_ordinal = n.batch_ordinal)",
+            (capture_id,),
+        ).rowcount
+    return deleted
+
+
+def _row_tuple(capture_id: int, batch_ordinal: int, n: ProjectedNotice) -> tuple:
+    return (
+        capture_id,
+        n.key.year,
+        n.key.number,
+        batch_ordinal,
+        n.source_format,
+        n.schema_version,
+        n.source_filename,
+        n.notice_uuid,
+        n.notice_version,
+        n.publication_date,
+        n.publication_date_raw,
+        n.dispatch_date,
+        n.dispatch_date_raw,
+        n.buyer_country,
+        n.buyer_country_iso,
+        n.buyer_country_status,
+        n.primary_cpv,
+        n.primary_cpv_status,
+        list(n.additional_cpv),
+    )
+
+
+def load_batch(
+    conn: psycopg.Connection,
+    capture_id: int,
+    batch_ordinal: int,
+    notices: Sequence[ProjectedNotice],
+) -> None:
+    """Load one deterministic batch: COPY the rows and record the batch, atomically.
+
+    A duplicate canonical identity (within the batch or against an earlier batch)
+    violates the notice primary key, the transaction rolls back, and the caller
+    fails the capture.
+    """
+    columns = ", ".join(_NOTICE_COLUMNS)
+    lo = notices[0].source_filename if notices else ""
+    hi = notices[-1].source_filename if notices else ""
+    with conn.transaction(), conn.cursor() as cur:
+        with cur.copy(
+            f"copy tl_work.notice_capture ({columns}) from stdin"
+        ) as copy:
+            for notice in notices:
+                copy.write_row(_row_tuple(capture_id, batch_ordinal, notice))
+        cur.execute(
+            "insert into tl_work.capture_batch"
+            " (capture_id, batch_ordinal, member_lo, member_hi, row_count)"
+            " values (%s, %s, %s, %s, %s)",
+            (capture_id, batch_ordinal, lo, hi, len(notices)),
+        )
+        cur.execute(
+            "update tl_work.capture set status = 'loading'"
+            " where capture_id = %s and status = 'acquiring'",
+            (capture_id,),
+        )
+
+
+def reconcile(
+    conn: psycopg.Connection,
+    capture_id: int,
+    member_count: int,
+    distinct_notice_count: int,
+) -> ReconcileResult:
+    with conn.transaction():
+        loaded = conn.execute(
+            "select count(*) from tl_work.notice_capture where capture_id = %s",
+            (capture_id,),
+        ).fetchone()[0]
+        ok = loaded == distinct_notice_count == member_count
+        conn.execute(
+            "update tl_work.capture"
+            " set member_count = %s, distinct_notice_count = %s, loaded_row_count = %s,"
+            "     status = case when %s and status in ('acquiring', 'loading')"
+            "                   then 'loaded' else status end"
+            " where capture_id = %s",
+            (member_count, distinct_notice_count, loaded, ok, capture_id),
+        )
+    return ReconcileResult(ok, loaded, member_count, distinct_notice_count)
+
+
+def publish(
+    conn: psycopg.Connection,
+    capture_id: int,
+    *,
+    before_commit: Callable[[psycopg.Connection], None] | None = None,
+) -> None:
+    """Make a reconciled capture the visible one for its source package.
+
+    The pointer swap, the supersede of the prior capture, and the status change
+    happen in one transaction. ``before_commit`` runs inside it: raising from it
+    (a future coverage gate, or a simulated crash in tests) aborts the publish
+    and leaves visibility and completion status untouched.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            "select source_package_id, status, member_count, distinct_notice_count,"
+            " loaded_row_count from tl_work.capture where capture_id = %s for update",
+            (capture_id,),
+        ).fetchone()
+        if row is None:
+            raise CaptureError(f"capture {capture_id} does not exist")
+        package, status, members, distinct, loaded = row
+        if status != "loaded":
+            raise CaptureNotReady(f"capture {capture_id} is {status!r}, not 'loaded'")
+        if not (loaded == distinct == members):
+            raise CaptureNotReady(f"capture {capture_id} has not reconciled")
+
+        prior = conn.execute(
+            "select capture_id from tl_work.published_capture where source_package_id = %s",
+            (package,),
+        ).fetchone()
+        if prior is not None and prior[0] != capture_id:
+            conn.execute(
+                "update tl_work.capture set status = 'superseded' where capture_id = %s",
+                (prior[0],),
+            )
+        conn.execute(
+            "insert into tl_work.published_capture (source_package_id, capture_id, published_at)"
+            " values (%s, %s, now())"
+            " on conflict (source_package_id)"
+            " do update set capture_id = excluded.capture_id, published_at = now()",
+            (package, capture_id),
+        )
+        conn.execute(
+            "update tl_work.capture set status = 'published', published_at = now()"
+            " where capture_id = %s",
+            (capture_id,),
+        )
+        if before_commit is not None:
+            before_commit(conn)
+    release_lock(conn, package)
+
+
+def fail_capture(conn: psycopg.Connection, capture_id: int, reason: str) -> None:
+    with conn.transaction():
+        row = conn.execute(
+            "select source_package_id, status from tl_work.capture"
+            " where capture_id = %s for update",
+            (capture_id,),
+        ).fetchone()
+        if row is not None and row[1] != "published":
+            conn.execute(
+                "update tl_work.capture set status = 'failed', failure_reason = %s"
+                " where capture_id = %s",
+                (reason[:2000], capture_id),
+            )
+    if row is not None:
+        release_lock(conn, row[0])

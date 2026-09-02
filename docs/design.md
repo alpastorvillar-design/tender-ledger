@@ -1,6 +1,9 @@
 # Design and source contract
 
-Status: source inspection implemented; database semantics below define the next implementation slice.
+Status: source inspection and the transactional PostgreSQL loader are implemented.
+See [projection.md](projection.md) for the field contract and [loading.md](loading.md)
+for the capture/batch/publish semantics and their guarantees. This document keeps
+the source observations and the rationale behind those semantics.
 
 ## Source selection and observed behavior
 
@@ -49,15 +52,15 @@ Capture order describes what this system acquired, not the official publication/
 
 ## Loading and reader visibility
 
-The next slice will implement:
+Implemented in [loading.md](loading.md). In summary:
 
-1. Download into a bounded temporary file; validate a complete archive and finalize its immutable artifact and manifest.
-2. Assign a capture identity that survives retries, with source package identity, checksum, and contract version.
-3. Stream members and apply deterministic batches into capture-scoped PostgreSQL records, with batch data and batch status committed together.
-4. Reconcile expected members, distinct keys, loaded records, and source checks.
-5. Publish the completed capture with a transactional state transition. Consumption views expose only completed captures; working tables remain internal.
+1. Hash the whole archive; a mid-run change or truncation cannot publish as complete. (Resumable download is a later slice; the loader takes a local file.)
+2. A capture identity is persisted before any row loads, with source package identity, checksum, and contract version, and survives retries.
+3. Members stream and apply as deterministic batches into capture-scoped rows; batch data and batch status commit together.
+4. Reconcile expected members, distinct keys, and loaded records. Source (API) checks are still deferred, so `source_coverage_verified` stays false.
+5. Publish is a single transactional pointer swap. `tl_read` views expose only the published capture per package; `tl_work` tables are internal and unreachable by the reader role.
 
-Readers must keep seeing the previous complete capture while a replacement is partial or failed. Do not upsert partial batches directly into an exposed current-state table. Repeated content from daily/monthly packages must not inflate the distinct-publication count.
+Readers keep seeing the previous complete capture while a replacement is partial or failed - the pointer swap is the only visibility change. Partial batches are never upserted into an exposed current-state table. `tl_read.distinct_notice` collapses repeated content from overlapping daily/monthly packages so it does not inflate the distinct-publication count.
 
 Raw storage and PostgreSQL do not share a transaction. Preserve recoverable artifacts after failure. Serialize conflicting work initially; do not promise exactly-once provider delivery.
 

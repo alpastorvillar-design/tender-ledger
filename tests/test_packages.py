@@ -3,15 +3,14 @@
 import gzip
 import io
 import json
-from pathlib import Path
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+from pathlib import Path
 
 from tender_ledger.packages import Limits, NoticeKey, PackageError, inspect_notice, inspect_package
-
 
 LEGACY = b'''<TED_EXPORT xmlns="http://publications.europa.eu/resource/schema/ted/R2.0.9/publication"
 DOC_ID="000995-2020" VERSION="R2.0.9.S05.E01"/>'''

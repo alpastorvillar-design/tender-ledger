@@ -1,14 +1,14 @@
 """Inspect bounded TED archives without extracting their members to disk."""
 
-from collections import Counter
-from dataclasses import dataclass
 import gzip
 import hashlib
-from pathlib import Path, PurePosixPath
 import re
 import tarfile
-from typing import BinaryIO
 import xml.etree.ElementTree as ET
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 
 class PackageError(ValueError):
@@ -52,7 +52,12 @@ EFORMS_ROOTS = {
 CBC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2}"
 
 
-def inspect_notice(member_name: str, xml: bytes) -> tuple[NoticeKey, str, str]:
+def parse_notice(member_name: str, xml: bytes) -> tuple[ET.Element, NoticeKey, str, str]:
+    """Return the parsed root plus (key, format, schema version) for one member.
+
+    Enforces the supported encoding, the DTD/entity restriction, and the root
+    contract. Callers that only need the metadata use ``inspect_notice``.
+    """
     key = NoticeKey.parse(PurePosixPath(member_name).name)
     # The supported source encoding is UTF-8. Decode before screening declarations
     # so an alternative byte encoding cannot bypass the DTD/entity restriction.
@@ -72,7 +77,7 @@ def inspect_notice(member_name: str, xml: bytes) -> tuple[NoticeKey, str, str]:
         # Some published legacy members omit VERSION; their namespace still
         # identifies the supported schema family.
         version = root.get("VERSION") or root.tag.split("/")[-2]
-        return key, "legacy", version
+        return root, key, "legacy", version
     if root.tag in EFORMS_ROOTS:
         version = root.findtext(f"{CBC}CustomizationID")
         identifier = root.find(f"{CBC}ID")
@@ -84,8 +89,13 @@ def inspect_notice(member_name: str, xml: bytes) -> tuple[NoticeKey, str, str]:
             or not identifier.text
         ):
             raise PackageError(f"Missing eForms notice identifier in {member_name}")
-        return key, "eforms", version
+        return root, key, "eforms", version
     raise PackageError(f"Unsupported XML root in {member_name}: {root.tag}")
+
+
+def inspect_notice(member_name: str, xml: bytes) -> tuple[NoticeKey, str, str]:
+    _, key, form, version = parse_notice(member_name, xml)
+    return key, form, version
 
 
 class _ExpandedReader:
@@ -104,76 +114,147 @@ class _ExpandedReader:
         return data
 
 
+@dataclass(frozen=True)
+class NoticeMember:
+    """One parsed XML member of a package archive."""
+
+    root: ET.Element
+    key: NoticeKey
+    source_format: str
+    schema_version: str
+    member_name: str
+
+
+def _check_member_path(member: tarfile.TarInfo) -> None:
+    parts = PurePosixPath(member.name).parts
+    if (
+        not parts
+        or member.name.startswith("/")
+        or ".." in parts
+        or "\\" in member.name
+        or ":" in member.name
+    ):
+        raise PackageError(f"Unsafe member path: {member.name!r}")
+
+
+class _PackageArchive:
+    """Walk a gzip-tar TED package one member at a time under fixed resource limits.
+
+    Both the summarizing inspector and the streaming loader read packages through
+    this class so archive-integrity behavior (gzip CRC, tar trailer, member
+    validation, byte limits) is defined once.
+    """
+
+    def __init__(self, path: Path, limits: Limits):
+        self.path = path
+        self.limits = limits
+        self.compressed_bytes = 0
+        self.expanded_bytes = 0
+        self.xml_member_bytes = 0
+        self.member_count = 0
+
+    def __enter__(self) -> "_PackageArchive":
+        try:
+            self._source = self.path.open("rb")
+            self.compressed_bytes = self._source.seek(0, 2)
+            self._source.seek(0)
+        except OSError as exc:
+            raise PackageError(f"Unreadable or corrupt archive: {self.path.name}") from exc
+        if self.compressed_bytes > self.limits.compressed_bytes:
+            self._source.close()
+            raise PackageError("Compressed archive exceeds its byte limit")
+        self._gzip = gzip.GzipFile(fileobj=self._source, mode="rb")
+        self._reader = _ExpandedReader(self._gzip, self.limits.expanded_bytes)
+        self._tar: tarfile.TarFile | None = None
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        for closeable in (getattr(self, "_tar", None), getattr(self, "_gzip", None),
+                          getattr(self, "_source", None)):
+            try:
+                if closeable is not None:
+                    closeable.close()
+            except OSError:
+                pass
+
+    def members(self):
+        try:
+            # One header block prevents read-ahead from hiding bytes after the
+            # end marker from the explicit trailer check below. Opening here keeps
+            # a corrupt gzip header on the same error path as a corrupt body.
+            # __exit__ closes it; this class is itself the context manager.
+            self._tar = tarfile.open(  # noqa: SIM115
+                fileobj=self._reader, mode="r|", stream=True, bufsize=512
+            )
+            for member in self._tar:
+                _check_member_path(member)
+                if member.isdir():
+                    continue
+                if (
+                    not member.isfile()
+                    or member.issparse()
+                    or not member.name.endswith(".xml")
+                ):
+                    raise PackageError(f"Unsupported archive member: {member.name!r}")
+                if member.size > self.limits.member_bytes:
+                    raise PackageError(f"Member exceeds its byte limit: {member.name}")
+                if self.member_count >= self.limits.notices:
+                    raise PackageError("Archive exceeds its notice limit")
+                stream = self._tar.extractfile(member)
+                if stream is None:
+                    raise PackageError(f"Unreadable member: {member.name}")
+                with stream:
+                    xml = stream.read(self.limits.member_bytes + 1)
+                if len(xml) != member.size:
+                    raise PackageError(f"Incomplete member: {member.name}")
+                root, key, form, version = parse_notice(member.name, xml)
+                self.member_count += 1
+                self.xml_member_bytes += member.size
+                yield NoticeMember(root, key, form, version, member.name)
+            # tar iteration can stop before gzip's trailer. Consume the rest to
+            # check CRC/length and reject non-padding data after the tar.
+            while remainder := self._reader.read(64 * 1024):
+                if any(remainder):
+                    raise PackageError("Unexpected data after the tar end marker")
+            self.expanded_bytes = self._reader.count
+        except (OSError, EOFError, tarfile.TarError) as exc:
+            raise PackageError(f"Unreadable or corrupt archive: {self.path.name}") from exc
+
+
+def stream_notices(path: Path, limits: Limits = Limits()):
+    """Yield a NoticeMember for each XML member, enforcing the same archive
+    integrity and resource limits as inspect_package. The stream holds one member
+    at a time; duplicate-identity enforcement is left to the caller (for the
+    loader, the database primary key)."""
+    with _PackageArchive(path, limits) as archive:
+        yield from archive.members()
+
+
 def inspect_package(path: Path, limits: Limits = Limits()) -> dict:
     keys: set[NoticeKey] = set()
     formats: Counter[str] = Counter()
     versions: Counter[str] = Counter()
-    member_bytes = 0
     try:
         with path.open("rb") as source:
-            compressed_bytes = source.seek(0, 2)
-            if compressed_bytes > limits.compressed_bytes:
-                raise PackageError("Compressed archive exceeds its byte limit")
-            source.seek(0)
             checksum = hashlib.file_digest(source, "sha256").hexdigest()
-            source.seek(0)
-            with gzip.GzipFile(fileobj=source, mode="rb") as expanded:
-                reader = _ExpandedReader(expanded, limits.expanded_bytes)
-                # One header block prevents read-ahead from hiding bytes after
-                # the end marker from the explicit trailer check below.
-                with tarfile.open(
-                    fileobj=reader, mode="r|", stream=True, bufsize=512
-                ) as archive:
-                    for member in archive:
-                        parts = PurePosixPath(member.name).parts
-                        if (
-                            not parts
-                            or member.name.startswith("/")
-                            or ".." in parts
-                            or "\\" in member.name
-                            or ":" in member.name
-                        ):
-                            raise PackageError(f"Unsafe member path: {member.name!r}")
-                        if member.isdir():
-                            continue
-                        if (
-                            not member.isfile()
-                            or member.issparse()
-                            or not member.name.endswith(".xml")
-                        ):
-                            raise PackageError(f"Unsupported archive member: {member.name!r}")
-                        if member.size > limits.member_bytes:
-                            raise PackageError(f"Member exceeds its byte limit: {member.name}")
-                        if len(keys) >= limits.notices:
-                            raise PackageError("Archive exceeds its notice limit")
-                        stream = archive.extractfile(member)
-                        if stream is None:
-                            raise PackageError(f"Unreadable member: {member.name}")
-                        with stream:
-                            xml = stream.read(limits.member_bytes + 1)
-                        if len(xml) != member.size:
-                            raise PackageError(f"Incomplete member: {member.name}")
-                        key, form, version = inspect_notice(member.name, xml)
-                        if key in keys:
-                            raise PackageError(f"Duplicate publication: {key.number}-{key.year}")
-                        keys.add(key)
-                        formats[form] += 1
-                        versions[version] += 1
-                        member_bytes += member.size
-                # tar iteration can stop before gzip's trailer. Consume the rest
-                # to check CRC/length and reject non-padding data after the tar.
-                while remainder := reader.read(64 * 1024):
-                    if any(remainder):
-                        raise PackageError("Unexpected data after the tar end marker")
-    except (OSError, EOFError, tarfile.TarError) as exc:
+    except OSError as exc:
         raise PackageError(f"Unreadable or corrupt archive: {path.name}") from exc
-    return {
-        "sha256": checksum,
-        "compressed_bytes": compressed_bytes,
-        "expanded_bytes": reader.count,
-        "xml_member_bytes": member_bytes,
-        "notice_count": len(keys),
-        "formats": dict(sorted(formats.items())),
-        "schema_versions": dict(sorted(versions.items())),
-        "source_coverage_verified": False,
-    }
+    with _PackageArchive(path, limits) as archive:
+        for member in archive.members():
+            if member.key in keys:
+                raise PackageError(
+                    f"Duplicate publication: {member.key.number}-{member.key.year}"
+                )
+            keys.add(member.key)
+            formats[member.source_format] += 1
+            versions[member.schema_version] += 1
+        return {
+            "sha256": checksum,
+            "compressed_bytes": archive.compressed_bytes,
+            "expanded_bytes": archive.expanded_bytes,
+            "xml_member_bytes": archive.xml_member_bytes,
+            "notice_count": len(keys),
+            "formats": dict(sorted(formats.items())),
+            "schema_versions": dict(sorted(versions.items())),
+            "source_coverage_verified": False,
+        }

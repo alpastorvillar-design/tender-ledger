@@ -79,6 +79,17 @@ the container, and verify that only the committed row remains. Remove only that
 test table afterwards. Record the commands, results, image digest, and runtime
 versions before calling this environment verified.
 
-Migrations, ingestion tests, reader permissions, and recovery tests will be added
-with the transactional loader. A healthy empty database alone does not validate
-the data pipeline.
+## Loader schema and tests
+
+With the container healthy:
+
+```sh
+python -m pip install -e ".[dev]"
+python -m tender_ledger db upgrade          # applies db/migrations/*.sql to tender_ledger
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
+The integration tests create and drop a dedicated `tender_ledger_test` database
+(never `tender_ledger`, never the volume) and skip with a clear message if the
+server is unreachable. `db upgrade`, `load`, and `status` read connection
+settings from `TL_DB_*` / `POSTGRES_*` or `.env`.
