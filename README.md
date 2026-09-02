@@ -67,6 +67,13 @@ These checks were performed on 2026-09-02. No PostgreSQL load, cloud deployment,
 
 See [design and source contract](docs/design.md) and [scale and SQL requirements](docs/scale-and-sql.md).
 
+## Local database setup
+
+[Local development](docs/local-development.md) describes the prepared PostgreSQL
+Compose configuration, private password generation, and data persistence. Docker
+and WSL still need setup on the current development host; no container or database
+load has been verified yet.
+
 ## Sources
 
 [TED XML packages](https://docs.ted.europa.eu/ODS/latest/reuse/download-xml.html), [direct download conventions](https://docs.ted.europa.eu/ODS/latest/reuse/download-direct.html), and [Search API](https://docs.ted.europa.eu/api/latest/search.html).
