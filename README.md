@@ -70,9 +70,9 @@ See [design and source contract](docs/design.md) and [scale and SQL requirements
 ## Local database setup
 
 [Local development](docs/local-development.md) describes the prepared PostgreSQL
-Compose configuration, private password generation, and data persistence. Docker
-and WSL still need setup on the current development host; no container or database
-load has been verified yet.
+Compose configuration, private password generation, and data persistence. The
+PostgreSQL 17.11 container passed connectivity, transaction rollback, and restart
+persistence checks on 2026-09-03. Database ingestion remains unimplemented.
 
 ## Sources
 

@@ -1,7 +1,6 @@
 # Local PostgreSQL environment
 
-Status: configuration prepared. A PostgreSQL container has not been started or
-tested yet. The current Windows development host needs WSL and Docker Desktop.
+Status: PostgreSQL runtime verified on 2026-09-03 with Docker Desktop and WSL 2.
 Database loading and migrations remain the next implementation task.
 
 ## Prerequisites
@@ -16,9 +15,8 @@ Database loading and migrations remain the next implementation task.
 
 The initial image is `postgres:17.11-bookworm`, an explicit patch version from the
 [official image inventory](https://github.com/docker-library/official-images/blob/master/library/postgres).
-Compose pins its registry manifest digest as well. The tag and manifest were
-verified against the public registry; the image has not been pulled or run yet.
-Record the actual platform image identity when validating the runtime.
+Compose pins its registry manifest digest as well. The image was pulled and run
+successfully on linux/amd64; PostgreSQL reported version 17.11.
 The container has a 2 GiB memory limit, two CPUs, and 256 MiB shared memory. These
 are initial development settings, not a historical-load benchmark configuration.
 
@@ -60,7 +58,19 @@ docker compose start postgres
 volume. Adding `--volumes` deletes the database, so it is not part of routine
 cleanup. The service does not restart automatically after a host reboot.
 
-## Runtime verification still required
+## Runtime verification
+
+Verified on 2026-09-03 using Docker Engine 29.7.2, Docker Desktop 4.89.0, and
+Compose 5.5.0:
+
+- PostgreSQL 17.11 responded in the `tender_ledger` database and became healthy.
+- The host could connect to `127.0.0.1:5433`; password authentication over TCP
+  inside the container succeeded.
+- A committed row survived a container restart; a rolled-back row remained absent.
+- The disposable probe table was removed and the database remained healthy.
+
+These are environment checks, not ingestion or historical-scale results.
+To repeat the environment verification:
 
 Confirm that the health check passes and the SQL command above returns the
 expected PostgreSQL version and database. Then run a disposable-table transaction
