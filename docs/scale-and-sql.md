@@ -1,15 +1,17 @@
 # Scale and SQL requirements
 
-Status: acceptance plan. No load or benchmark results are available yet.
+Status: acceptance plan. Archive inspection is implemented; no database load or historical benchmark results are available yet.
 
 ## Dataset and completion gates
 
 The historical target is TED notices published during 2020–2025 across countries. A one-record API probe on 2026-09-02 reported 4,523,626 matching results. Actual available packages, canonical identities, supported formats, and reconciliation determine the final loaded count. Spain is an analytical subset, not the size limit of the archive.
 
+An independent header inventory on the same date found all 72 monthly packages, advertising 16,783,140,714 compressed bytes (15.63 GiB). The 2020–2021 subset advertises 3,891,273,136 bytes and its API counts sum to 1,320,286 notices, making it a candidate for the minimum-scale delivery. These are source/header measurements, not database storage measurements or loaded counts. Validate modern and mixed-format periods as well as that legacy subset.
+
 | Stage | Required evidence |
 | --- | --- |
 | Correctness | Small deterministic fixtures containing duplicates, changes, invalid input, and incomplete work |
-| Engineering rehearsal | At least 100,000 distinct real notices, with resource measurements and a restart test |
+| Engineering rehearsal | Complete monthly artifacts until at least 100,000 distinct real notices, plus legacy/eForms samples, resource measurements, and a restart test |
 | Minimum scale gate | At least 1,000,000 distinct real notices, reconciled to source artifacts, with the SQL workload and recovery evidence below |
 | Historical target | Process the available 2020–2025 archive; account for missing periods, unsupported formats, and differences from the API count |
 
@@ -19,7 +21,7 @@ Count notices, observations, lots, organizations, and raw records separately. Re
 
 ## Historical loading and resources
 
-Use TED XML packages for historical bootstrap after validating the download contract; use bounded Search API windows for incremental ingestion and reconciliation. Stream archive members and XML records rather than loading the historical dataset into memory. Verify checksums, archive completion, member counts, parser failures, and raw-to-destination reconciliation.
+Use TED XML packages as the first loading path, including daily updates; use bounded Search API queries for reconciliation. Stream archive members and XML records rather than loading the historical dataset into memory. Verify checksums, archive completion, member counts, parser failures, and raw-to-destination reconciliation. Record counts and compare identifier sets where feasible: equal totals alone can conceal a missing key and an extra one.
 
 Load bounded batches through PostgreSQL staging and set-based statements. Define transaction boundaries, deterministic batch identity, duplicate handling, and completion visibility before implementing multi-batch loading. A corrupt archive, incompatible format, exhausted limit, or missing batch must not become a successful window.
 
@@ -36,15 +38,17 @@ Large runs are explicit local operations, separate from routine CI. Raw datasets
 The data model must support a documented notice grain, observed changes, source provenance, and complete-window status. Implement at least six useful queries, each with a correctness fixture and an explanation of its grain:
 
 1. Monthly notice counts by country and primary CPV, with explicit treatment of missing values and multi-valued classifications.
-2. Latest known business observation per notice, with deterministic ordering and ties.
-3. Observed field changes using window functions; separate observation time from publication time.
-4. The dataset as known at an observation-time cutoff, without claiming unavailable official historical versions.
-5. Coverage and ingestion freshness by period, distinguishing an empty source period from an incomplete extraction.
-6. Late changes, duplicate source records, and reconciliation discrepancies across ingestion windows.
+2. Latest completed capture per publication, with deterministic capture ordering. Grouping by procedure answers a different question.
+3. Supported official change references and observed content differences, with explicit format coverage and unresolved targets; use window functions where their ordering has a valid meaning.
+4. The dataset as captured by this system at an acquisition-time cutoff, without presenting backfill ingestion dates as official historical versions.
+5. Coverage and ingestion freshness over a calendar axis with LEFT JOIN, distinguishing empty source periods, missing captures, and unavailable verification.
+6. Duplicate source records and reconciliation discrepancies using NOT EXISTS or EXCEPT over publication keys.
 
 Extend buyer-level analysis only after verifying organization identifiers and join cardinality. Do not infer awards, expenditure, or supplier outcomes from notices that do not contain those facts.
 
 Work covers joins and null semantics, CTEs, window functions, constraints, bulk loading, upserts, transaction isolation, and lock behavior. For performance, compare a correct baseline with justified changes using query plans, statistics, indexes, and, where useful, partitioning. Partitioning is a hypothesis to measure; its interaction with uniqueness and pruning must be explained.
+
+The initial PostgreSQL baseline is unpartitioned, with publication year included in the natural key. Evaluate annual partitioning against that baseline and plan any migration before the full historical load. Plans, estimated/actual rows, buffers, throughput, and latency provide complementary evidence.
 
 References: PostgreSQL [COPY](https://www.postgresql.org/docs/current/sql-copy.html), [EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html), and [partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html). Pin implementation documentation to the chosen supported PostgreSQL version.
 

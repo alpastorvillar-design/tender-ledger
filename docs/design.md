@@ -1,70 +1,84 @@
-# Tender Ledger: design and source observations
+# Design and source contract
 
-Status: proposed semantics, pending review and implementation.
+Status: source inspection implemented; database semantics below define the next implementation slice.
 
-## Verified source behavior
+## Source selection and observed behavior
 
-A bounded source probe on 2026-09-02 used the public, unauthenticated endpoint:
+Load daily and monthly TED XML packages first. Use the Search API for counts and identifier reconciliation, with `scope: ALL` and `checkQuerySyntax: false`. A separate API-to-database adapter is deferred until it has a concrete use case.
 
-```text
-POST https://api.ted.europa.eu/v3/notices/search
-```
+Observed on 2026-09-02:
 
-The request used `query: CY=ESP`, fields `publication-number` and `publication-date`, `limit: 2`, `scope: ALL`, and `paginationMode: ITERATION`.
+| Check | Result |
+| --- | --- |
+| `/packages/daily/202300220` | HTTP 200, gzip; the documented `/packages/notice/daily/...` variant returned 404 |
+| 72 monthly HEAD requests, 2020–2025 | All HTTP 200; sum 16,783,140,714 compressed bytes |
+| Six annual API counts | 643,552; 676,734; 735,067; 795,680; 801,444; 871,149 |
+| Mixed package, 2023-11-15 | 2,967 XML members and distinct publication keys |
+| Mixed-day formats | 1,813 legacy; 1,154 eForms; format determined by each member's root |
+| API comparison for the mixed day | 12 pages, 2,967 distinct keys, no missing or extra keys |
+| Historical query with ALL / LATEST | 4,523,626 / 0 results, both HTTP 200 |
+| Sunday 2020-01-05 with ALL | 0 reported results; zero is not intrinsically an error |
 
-With `checkQuerySyntax: true`, the probe returned HTTP 200 with an empty notice array and no result count. That response validated syntax; it did not establish that the query had no matching notices. A subsequent request with this flag false returned two notices and an iteration token.
+These are observations, not a provider guarantee. Equal counts alone do not establish equal datasets. Archive and API channels share the same provider and can have correlated errors. Record query parameters, capture time, returned total, timeout state, duplicate counts, and available identifier differences.
 
-One observed pair was `301759-2016` and `2016-09-01+02:00`. The date value is a calendar date with a timezone suffix, not an update timestamp. A query without a date filter returned historical notices; result order must not become an implicit checkpoint rule.
+A mismatch or unavailable verification leaves coverage unresolved; it must not advance a successful checkpoint. A legitimate empty period needs supporting publication-calendar/source evidence. Never infer it solely from HTTP 200 or a missing package.
 
-A second request using that token returned another two notices, with no overlap in publication numbers between the two pages. This probe verifies connectivity, the selected fields, and one successful pagination step. It does not establish complete historical coverage, snapshot consistency, correction semantics, or stable identifiers across every notice format. The meaning of the country alias and the intended date filter must be confirmed before finalizing the source contract.
+Sources: [download conventions](https://docs.ted.europa.eu/ODS/latest/reuse/download-direct.html) and [API pagination](https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html).
 
-Sources: [Search API](https://docs.ted.europa.eu/api/latest/search.html), [pagination and iteration](https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html).
+## Notice identity and formats
 
-A separate probe used `query: PD>=20200101 AND PD<=20251231`, `limit: 1`, `scope: ALL`, `checkQuerySyntax: false`, and iteration mode. It returned HTTP 200, `timedOut: false`, one notice (`1-2020`, `2020-01-02+01:00`), and a reported total of 4,523,626. This establishes a plausible source pool for historical ingestion, not loaded volume or completeness.
+Canonical publication identity is `(publication_year, publication_number_int)`. Retain the original source strings. For example, `995-2020`, `000995_2020.xml`, and `00000995-2020` normalize to one key. Enforce uniqueness and check filename/document agreement where the XML exposes that publication identifier.
 
-TED documents daily and monthly XML packages without sign-in. Historical bootstrap will use those packages if the source contract and a bounded download validate them; the Search API will support recent windows and reconciliation. Both adapters represent the same source and must map to the same identity and business fields. Legacy TED XML and eForms require explicit format coverage. See [XML downloads](https://docs.ted.europa.eu/ODS/latest/reuse/download-xml.html) and [direct download conventions](https://docs.ted.europa.eu/ODS/latest/reuse/download-direct.html).
+Select parsers by root and namespace, never by filename width or publication year. The inspected mixed archive contains legacy namespaces R2.0.8/R2.0.9 and eForms SDK versions 1.3, 1.6, 1.7, 1.8, and 1.9. Its R2.0.8 documents omit the VERSION attribute, so the inspector records the namespace version when that optional attribute is absent. Unknown roots fail explicitly.
 
-The direct-download documentation contains different route shapes in its pattern and example. Resolve the actual route with a bounded request before building a bulk client. XML filename padding also differs from the observed API identifier: retain original references and verify a shared canonical identity rather than treating formatting differences as distinct notices.
+Publication date is a calendar date. Values such as `2020-01-03+01:00` and dispatch date `2019-12-26Z` retain their original suffix separately; neither supplies an event time.
 
-## Proposed processing model
+The curated projection will use an explicit field allowlist and exclude contact details. Raw archives remain private. Constructed test fixtures contain no real contact information. Check reuse terms before publishing any real excerpts: [TED legal notice](https://ted.europa.eu/en/legal-notice).
 
-1. Extract one bounded window into immutable raw pages or validate an archive and its member inventory.
-2. Mark its manifest complete only when extraction finishes successfully.
-3. Validate and normalize the selected business fields.
-4. Apply a bounded batch, quality checks, and its applied-state marker in one PostgreSQL transaction. The initial small window is one batch.
-5. Expose run status and queryable current notices and observations.
+## Publication changes and acquisition history
 
-Raw storage and PostgreSQL do not share a transaction. A crash may leave an unused raw artifact; a retry must recognize a complete manifest and apply it safely. It must never treat a truncated extraction as a complete window.
+A procurement procedure, a published notice, an official change reference, and a capture of source bytes are separate concepts.
 
-Historical archives must not become a single transaction over millions of records. The proposed extension uses deterministic bounded batches, `COPY FROM STDIN` into staging, and set-based application. A window becomes complete only after all expected batches pass reconciliation. Review must settle how partial batches are exposed to readers, how window completion is committed, and how replay behaves after any batch boundary. Until then, multi-batch visibility is an open design decision, not an implemented guarantee.
+The [eForms change specification](https://docs.ted.europa.eu/eforms/latest/schema/change-notice.html) gives a change notice its own notice identifier and an explicit reference to the changed notice. A procedure identifier is useful for grouping; it must not replace that reference.
 
-Candidate notice key: `publication-number`, subject to checking the supported formats. Candidate observation key: notice key plus a hash of canonical business fields. Retrieval time is provenance and must not create a new business observation on every rerun.
+Observed examples reinforce the distinction: notice 335840-2025 has version 2 without a returned change reference; 335841-2025 has version 1 and references 288027-2025. Absence of eForms fields in legacy does not imply absence of corrections or references. Preserve supported links and unresolved targets, and report their coverage by format.
 
-The first implementation should serialize overlapping work for a source. It should not claim exactly-once delivery from TED. The goal is an idempotent destination effect under the tested failure model.
+Do not conclude that published files are immutable from a small unchanged sample. Keep immutable *local captures* and source provenance. A retry reuses a persisted capture identity; an intentional refresh creates a new capture identity. Hashes identify content, not every occurrence of content. A sequence A → B → A for the same package must retain all three captures even when the first and third reuse the same stored bytes.
 
-## Questions to resolve before locking the schema
+Capture order describes what this system acquired, not the official publication/version order. Do not sort recaptures using unchanged publication dates. Do not present archival ingestion time as a historical business-event time.
 
-- What identifies an original notice, correction, and publication version?
-- Which date field and country filter express the intended dataset?
-- Can a result set change during iteration, and how is incompleteness detected?
-- How do token expiration, window splitting, and bounded retries interact?
-- How are changes older than a lookback window found and reconciled?
-- Which normalized fields belong in the observation hash?
-- How should a content sequence A → B → A retain its observed chronology while identical retries remain idempotent? A content hash alone identifies a value, not every occurrence of that value.
-- What reuse and attribution requirements apply to checked-in source examples?
-- How do XML and API projections produce equivalent identities and hashes across legacy forms and eForms?
-- What batch size, completion model, and reader visibility preserve recovery without a historical transaction of unbounded size?
-- Which archive routes, compressed sizes, expansion ratios, and format distributions are observed in a bounded sample?
+## Loading and reader visibility
 
-## MVP acceptance scenarios
+The next slice will implement:
 
-- Reapplying identical input leaves canonical rows and observation counts unchanged.
-- Changed business content creates a distinct observation without duplicate current rows.
-- A failed or incomplete extraction cannot advance its checkpoint.
-- A database failure rolls back both data and checkpoint changes.
-- Invalid required fields fail explicitly and preserve enough provenance to diagnose the record.
-- A replay after a crash produces the same business result as a clean run.
+1. Download into a bounded temporary file; validate a complete archive and finalize its immutable artifact and manifest.
+2. Assign a capture identity that survives retries, with source package identity, checksum, and contract version.
+3. Stream members and apply deterministic batches into capture-scoped PostgreSQL records, with batch data and batch status committed together.
+4. Reconcile expected members, distinct keys, loaded records, and source checks.
+5. Publish the completed capture with a transactional state transition. Consumption views expose only completed captures; working tables remain internal.
 
-The MVP has a Python CLI and PostgreSQL. Airflow orchestration follows once these scenarios are verified. No user interface, paid service, second source, streaming system, or model API is required.
+Readers must keep seeing the previous complete capture while a replacement is partial or failed. Do not upsert partial batches directly into an exposed current-state table. Repeated content from daily/monthly packages must not inflate the distinct-publication count.
 
-The MVP is an intermediate correctness milestone. Completion additionally requires the real-data, SQL, resource, and recovery evidence in [Scale and SQL requirements](scale-and-sql.md).
+Raw storage and PostgreSQL do not share a transaction. Preserve recoverable artifacts after failure. Serialize conflicting work initially; do not promise exactly-once provider delivery.
+
+Start with an unpartitioned PostgreSQL baseline and a year-aware publication key. Evaluate indexes and annual partitioning against measured plans before the historical run. Any migration must preserve uniqueness and query results.
+
+## Download integrity and resource bounds
+
+Retain compressed archives and stream XML members. Do not expand the historical archive to disk. Compare advertised and received lengths where available and compute a local checksum.
+
+Observed endpoints advertise byte ranges but lack ETag/Last-Modified validators. The first downloader restarts incomplete downloads; it does not combine byte ranges from potentially different object versions. Reuse completed verified artifacts on replay.
+
+The implemented inspector checks gzip CRC and trailer completion, validates supported member types, and applies byte/record limits. Its duplicate-key set is bounded by the configured notice limit; the historical loader will move large-scale uniqueness enforcement to PostgreSQL.
+
+## Acceptance before database loading is complete
+
+- Identical capture retries do not duplicate records or advance incomplete windows.
+- Conflicting identities, unsupported members, corrupt input, or failed verification remain explicit failures.
+- A legitimate empty period and an unavailable source are distinct states.
+- Interruptions between batches preserve the previous visible complete dataset.
+- A failed publication transaction changes neither visibility nor completion status.
+- A → B → A recapture remains distinguishable from a retry.
+- Recovery produces the same records as a clean execution over identical artifacts.
+
+Airflow follows the verified CLI. Scale, SQL, and recovery requirements remain in [scale-and-sql.md](scale-and-sql.md).
