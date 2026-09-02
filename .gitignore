@@ -1,0 +1,30 @@
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Runtime data and logs
+/data/
+/artifacts/
+/logs/
+*.log
+
+# Operating system files
+.DS_Store
+Thumbs.db
