@@ -1,42 +1,45 @@
-# Procurement Notice Pipeline
+# Tender Ledger
 
-A reliable ingestion pipeline for public procurement notices from TED.
+A recoverable procurement data pipeline with historical ingestion and PostgreSQL analytics.
 
-**Status:** repository setup and live source validation. The pipeline is not implemented yet.
+**Status:** source validation and design. The pipeline is not implemented yet; the scale requirements below are targets, not benchmark results.
 
 ## Problem
 
-An analyst needs a queryable record of published notices and observed changes, with enough provenance to identify incomplete batches and safely repeat failed work.
+Procurement analysts need a queryable record of public notices, observed changes, and data coverage. A failed download, repeated batch, or correction must not silently produce missing records or double counting.
 
-The project focuses on ingestion correctness: pagination, immutable source artifacts, validation, transactional loading, and recovery. It does not submit tenders or make procurement decisions.
+Tender Ledger will ingest TED notices across countries, using Spain as one analytical case. It will retain source provenance, reconcile incomplete work, and measure ingestion and SQL performance on real historical data.
 
-## Planned MVP
+## Planned system
 
 ```text
-TED Search API / offline fixtures
-              |
-      raw pages + manifest
-              |
-     validation and normalization
-              |
- PostgreSQL: notices, observations, run state
+TED historical XML packages     TED Search API
+             |                       |
+             +---- raw artifacts ----+
+                         |
+              validation + normalization
+                         |
+               PostgreSQL staging/load
+                         |
+        notices + observations + ingestion state
+                         |
+             SQL analysis + coverage reports
 ```
 
-- A Python CLI ingests one bounded window.
-- Offline fixtures make the default demonstration independent of network access.
-- Repeating the same input has no duplicate effect in the destination.
-- Data and checkpoint changes commit together.
-- Invalid or incomplete input produces an explicit failure.
-- Tests exercise plausible API, data, and transaction failures.
+Python provides the CLI and ingestion logic. PostgreSQL provides relational storage, transactional state, and SQL analysis. Docker provides the local runtime. Airflow will orchestrate the verified ingestion workflow and backfills.
 
-Docker will provide a reproducible local runtime. Airflow comes after the CLI and loading semantics are verified. Cloud deployment, Spark, streaming, and LLM features are outside the MVP.
+The first milestone uses small offline fixtures to prove correctness. Completion requires at least **one million distinct real notices**, a measured SQL workload, and recovery evidence. The historical target is the **2020–2025 TED archive**. Dataset definitions, resource limits, and acceptance criteria are in [Scale and SQL requirements](docs/scale-and-sql.md).
 
 ## Current evidence
 
-A bounded unauthenticated search returned two pages of two notices using an iteration token, with no duplicate publication numbers between these two pages. Source observations and open design questions are recorded in [the design note](docs/design.md).
+On 2026-09-02, an unauthenticated API probe returned two pages of two notices using an iteration token, without overlapping publication numbers. A separate one-record query for 2020–2025 reported **4,523,626 results**. This is a provider-reported count, not a downloaded or independently deduplicated dataset.
 
-There are no runnable pipeline commands or passing application tests to report yet.
+No historical packages have been downloaded, and no pipeline tests or benchmarks have run. [Design and source observations](docs/design.md) records what is verified and what remains open.
 
-## Source
+## Scope
 
-[TED Search API documentation](https://docs.ted.europa.eu/api/latest/search.html) and [pagination guidance](https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html).
+The project will demonstrate idempotent ingestion, bounded resource use, bulk loading, query optimization, late-change reconciliation, and observable failures on a single machine. Cloud deployment is a separate optional extension. Spark, streaming, a procurement portal, and automated procurement decisions are outside this project's scope.
+
+## Sources
+
+[TED Search API](https://docs.ted.europa.eu/api/latest/search.html), [pagination guidance](https://docs.ted.europa.eu/ODS/latest/reuse/search-api.html), and [historical XML downloads](https://docs.ted.europa.eu/ODS/latest/reuse/download-xml.html).
