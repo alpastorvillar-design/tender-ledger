@@ -1,11 +1,12 @@
 # Tender Ledger
 
-A recoverable procurement data pipeline with historical ingestion and PostgreSQL analytics.
+A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 
 **Status:** the archive inspector and a transactional package loader into
-PostgreSQL are implemented and tested (offline suite plus real-database
-integration). API coverage verification, the historical run, benchmarks, and
-orchestration are still pending.
+PostgreSQL are implemented and tested locally (offline suite plus real-database
+integration). A CI workflow is prepared; its first GitHub execution is pending.
+API coverage verification, the historical run, benchmarks, and orchestration
+are still pending.
 
 ## Problem
 
@@ -36,21 +37,23 @@ Python implements the ingestion workflow, PostgreSQL stores relational data and 
 
 ## Run the inspector
 
-Requires Python 3.13 or newer; tested with Python 3.14.3. The inspector uses only the standard library and needs no installation or network access. The database loader adds one dependency (`psycopg`).
+Requires Python 3.13 or newer; tested with Python 3.14.3. The inspector uses only the standard library and needs no installation or network access. The database loader adds one dependency (`psycopg`). The commands below run only the standard-library tests; full-suite setup follows later.
 
 From the repository root in PowerShell:
 
 ```powershell
 $env:PYTHONPATH = "$PWD/src"
 python -m tender_ledger inspect path/to/daily-package.tar.gz
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -p test_packages.py -v
+python -m unittest discover -s tests -p test_projection.py -v
 ```
 
 On Linux/macOS:
 
 ```sh
 PYTHONPATH=src python -m tender_ledger inspect path/to/daily-package.tar.gz
-PYTHONPATH=src python -m unittest discover -s tests -v
+PYTHONPATH=src python -m unittest discover -s tests -p test_packages.py -v
+PYTHONPATH=src python -m unittest discover -s tests -p test_projection.py -v
 ```
 
 The inspector prints a JSON summary with checksums, distinct notice counts, formats, and schema versions. Invalid archives exit with a nonzero status. It checks gzip integrity, duplicate identities, supported roots, required identity fields, and configured resource limits without extracting XML files to disk.
@@ -86,7 +89,8 @@ is under [`queries/`](queries/).
 - A real mixed daily package contained **2,967 distinct notices**: 1,813 legacy and 1,154 eForms. Its complete identifier set matched the API across 12 pages.
 - The inspector processed that package successfully; its checks are covered by automated tests.
 - That same real package (2,967 notices, 1,813 legacy + 1,154 eForms) was loaded into PostgreSQL as an M1 smoke: members, distinct keys, and loaded rows all reconciled at 2,967, a replay was a no-op, and every view reported `source_coverage_verified = false`.
-- The full test suite is **49 tests**: the offline archive/projection tests plus real-database integration tests for replay, resume, publish visibility, corruption, A/B/A, retired members, concurrency, and recovery equivalence.
+- The full test suite is **78 tests**, run locally without skips: archive/projection tests and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, and recovery equivalence.
+- An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
 
 Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03. No cloud deployment or historical performance benchmark has run.
 
@@ -99,6 +103,24 @@ Compose configuration, private password generation, and data persistence. The
 PostgreSQL 17.11 container passed connectivity, transaction rollback, and restart
 persistence checks on 2026-09-03, and now runs the loader's schema and integration
 tests (against a dedicated `tender_ledger_test` database).
+
+## Continuous integration
+
+[CI](.github/workflows/ci.yml) prepares Python 3.14.3 and a disposable PostgreSQL
+17.11 service, installs the constrained dependencies, runs Ruff, and executes
+the full suite. Skipped tests fail the gate, so an unavailable database cannot
+produce a successful integration result. No TED download is part of CI.
+
+To run the same lint and test commands locally after the environment setup:
+
+```sh
+python -m ruff check src tests scripts --no-cache
+python scripts/run_tests.py
+```
+
+The test runner creates and replaces its dedicated test databases; use a local
+development server or disposable CI service. It does not target the development
+database. Local checks are verified; the GitHub-hosted run remains pending.
 
 ## Sources
 

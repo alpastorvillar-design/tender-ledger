@@ -1,8 +1,8 @@
 """Create local PostgreSQL configuration without overwriting an existing file."""
 
-from pathlib import Path
 import os
 import secrets
+from pathlib import Path
 
 
 def main() -> int:

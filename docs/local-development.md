@@ -39,9 +39,10 @@ of `docker compose config`, which includes environment values; use `--quiet`.
 
 The database listens on `127.0.0.1:5433` on the host. Change `POSTGRES_PORT` in
 `.env` if that port is already occupied. The `postgres` account is the local
-bootstrap administrator; application and reader roles belong to the upcoming
-database implementation. Do not use these development credentials for a hosted
-service.
+bootstrap and loader administrator. Migrations create the restricted
+`tender_ledger_reader` role for the consumption views; the integration tests
+check its access. A separate least-privilege writer remains future work.
+Do not use these development credentials for a hosted service.
 
 PostgreSQL data lives in the Compose-managed `postgres_data` named volume, not
 inside the Git working tree. Password initialization applies only to an empty
@@ -99,7 +100,7 @@ With the container healthy and the environment installed:
 
 ```sh
 python -m tender_ledger db upgrade          # applies db/migrations/*.sql to tender_ledger
-python -m unittest discover -s tests -v     # or: python -m pytest
+python scripts/run_tests.py                # full suite; any skip is a failure
 ```
 
 `tests/test_packages.py` and `tests/test_projection.py` are standard-library only.
@@ -108,3 +109,10 @@ python -m unittest discover -s tests -v     # or: python -m pytest
 `tender_ledger_test` database (never `tender_ledger`, never its volume) and skip
 with a clear message when the server is unreachable. `db upgrade`, `load`, and
 `status` read connection settings from `TL_DB_*` / `POSTGRES_*` or `.env`.
+
+The strict runner treats those skips as a failed gate. Plain
+`python -m unittest discover -s tests -v` remains available for partial local
+checks, but an `OK (skipped=...)` result does not establish database correctness.
+`TL_TEST_DB` can select another dedicated name ending in `_test`; the suite
+replaces that database and its `_upgrade_test` variant. Never point tests at a
+shared or production database.
