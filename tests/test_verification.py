@@ -26,12 +26,12 @@ from tender_ledger import db
 from tender_ledger.config import load_config
 from tender_ledger.db import repository as repo
 from tender_ledger.loader import digest_archive, load_package
+from tender_ledger.package_contract import UnsupportedPackage
 from tender_ledger.source_api import (
     Budgets,
     Clock,
     SourceUnavailable,
     TransientSourceError,
-    UnsupportedPackage,
     keys_digest,
 )
 from tender_ledger.verification import VerificationError, verify_capture

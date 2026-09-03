@@ -1,4 +1,4 @@
-"""One daily package, end to end: acquire, load, verify, checkpoint.
+"""One package, end to end: acquire, load, verify, checkpoint.
 
 ``load`` publishes a local capture. ``verify`` decides whether the source agrees
 that capture is the whole issue. Neither of them means a workflow may treat the
@@ -39,7 +39,6 @@ import psycopg
 from .config import default_data_root
 from .db import repository as repo
 from .download import (
-    DAILY_LIMITS,
     Artifact,
     DownloadBudgets,
     DownloadError,
@@ -49,8 +48,10 @@ from .download import (
     validate_artifact,
 )
 from .loader import load_package
-from .packages import Limits
+from .package_contract import policy_for
+from .packages import Limits, limits_from
 from .source_api import Budgets, Clock, Transport
+from .source_api import budgets_from as api_budgets_from
 from .verification import VERIFIED, verify_capture
 
 DEFAULT_BATCH_SIZE = 500
@@ -142,7 +143,7 @@ def ingest_package(
     batch_size: int = DEFAULT_BATCH_SIZE,
     lock_wait: bool = False,
 ) -> IngestResult:
-    """Process one daily package and return what the database says about it.
+    """Process one package and return what the database says about it.
 
     ``url`` overrides the derived package URL (tests point it at a local server);
     ``transport`` is the Search API client the verification step uses.
@@ -151,18 +152,22 @@ def ingest_package(
     package_url(source_package_id)  # an unsupported identity stops here, before any work
     root = Path(data_root) if data_root is not None else default_data_root()
     destination = artifact_destination(root, source_package_id)
-    limits = limits or DAILY_LIMITS
+    # One policy for the whole flow: the archive limits, the acquisition budgets
+    # and the enumeration budgets all come from this package's identity, so no
+    # step can accept work another step would refuse.
+    policy = policy_for(source_package_id)
+    limits = limits or limits_from(policy)
 
     repo.acquire_lock(conn, source_package_id, wait=lock_wait)
     try:
-        replayed = _replay(conn, source_package_id, destination)
+        replayed = _replay(conn, source_package_id, destination, limits)
         if replayed is not None:
             return replayed
         run, resumed = _open_run(conn, source_package_id)
         return _advance(
             conn, run, resumed, destination, root,
             url=url, budgets=budgets, clock=clock, limits=limits,
-            transport=transport, api_budgets=api_budgets or Budgets(),
+            transport=transport, api_budgets=api_budgets or api_budgets_from(policy),
             batch_size=batch_size,
         )
     finally:
@@ -210,7 +215,7 @@ def _advance(
 
 
 def _replay(
-    conn: psycopg.Connection, source_package_id: str, destination: Path
+    conn: psycopg.Connection, source_package_id: str, destination: Path, limits: Limits
 ) -> IngestResult | None:
     """Certify a current checkpoint without touching the network, or decline.
 
@@ -223,7 +228,7 @@ def _replay(
     if status is None or not status["checkpoint_is_current"]:
         return None
     artifact = validate_artifact(
-        destination, expected_sha256=status["checkpoint_artifact_sha256"]
+        destination, expected_sha256=status["checkpoint_artifact_sha256"], limits=limits
     )
     if artifact is None:
         return None

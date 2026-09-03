@@ -5,6 +5,7 @@ derived from the package identity and only the tests inject a local one, so a
 downloader that quietly accepted an arbitrary URL would fail these tests.
 """
 
+import dataclasses
 import gzip
 import json
 import threading
@@ -20,10 +21,11 @@ from tender_ledger.download import (
     DownloadError,
     TransientDownloadError,
     artifact_destination,
+    budgets_for,
     download_package,
     package_url,
 )
-from tender_ledger.source_api import UnsupportedPackage
+from tender_ledger.package_contract import UnsupportedPackage
 
 PACKAGE = "daily/202300220"
 
@@ -92,7 +94,8 @@ class UrlDerivationTests(unittest.TestCase):
         )
 
     def test_an_unsupported_identity_has_no_url_and_no_path(self):
-        for bad in ("monthly/202300", "daily/2023", "daily/../etc", "notices/1"):
+        for bad in ("monthly/202300", "monthly/2023-1", "daily/2023", "daily/../etc",
+                    "notices/1"):
             with self.subTest(package=bad):
                 with self.assertRaises(UnsupportedPackage):
                     package_url(bad)
@@ -105,6 +108,66 @@ class UrlDerivationTests(unittest.TestCase):
             destination = artifact_destination(root, PACKAGE)
             self.assertTrue(destination.resolve().is_relative_to(root.resolve()))
             self.assertEqual(destination.name, "202300220.tar.gz")
+
+    def test_a_monthly_identity_drops_the_padding_in_the_url_and_keeps_it_on_disk(self):
+        self.assertEqual(
+            package_url("monthly/2024-01"), "https://ted.europa.eu/packages/monthly/2024-1"
+        )
+        self.assertEqual(
+            package_url("monthly/2023-11"), "https://ted.europa.eu/packages/monthly/2023-11"
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = artifact_destination(root, "monthly/2024-01")
+            self.assertTrue(destination.resolve().is_relative_to(root.resolve()))
+            self.assertEqual(
+                destination.relative_to(root).as_posix(), "packages/monthly/2024-01.tar.gz"
+            )
+
+
+class DeclaredLengthBudgetTests(DownloadTestCase):
+    """A monthly body is refused or accepted before a byte of it is transferred.
+
+    The largest package in the observed 2020-2025 inventory advertises 278 MiB.
+    The server here declares that length and then closes after a few bytes, so
+    the daily budget's refusal and the monthly budget's acceptance are both
+    proved without moving the volume.
+    """
+
+    OBSERVED_MONTHLY_BYTES = 291_615_691  # monthly/2024-01, HEAD on 2026-09-04
+
+    def setUp(self):
+        super().setUp()
+
+        def reply(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(self.OBSERVED_MONTHLY_BYTES))
+            handler.end_headers()
+            handler.wfile.write(b"only the first bytes")
+            handler.close_connection = True
+
+        self.server.reply = reply
+
+    def test_the_daily_budget_refuses_the_advertised_length_before_reading(self):
+        with self.assertRaises(DownloadError) as caught:
+            self.download(budgets=budgets_for(PACKAGE))
+        self.assertIn(f"advertises {self.OBSERVED_MONTHLY_BYTES} bytes", str(caught.exception))
+        self.assertIn("byte budget", str(caught.exception))
+        self.assertEqual(self.part_files(), [])
+        self.assertFalse(self.destination().exists())
+
+    def test_the_monthly_budget_accepts_that_length_and_fails_on_the_short_body(self):
+        budgets = dataclasses.replace(
+            budgets_for("monthly/2024-01"), max_attempts=1, backoff_base_seconds=0.01
+        )
+        self.assertGreaterEqual(budgets.max_artifact_bytes, self.OBSERVED_MONTHLY_BYTES)
+        with self.assertRaises(DownloadError) as caught:
+            self.download(budgets=budgets)
+        # Past the declared-length gate: the failure is now about what arrived.
+        self.assertIn("incomplete HTTP body", str(caught.exception))
+        self.assertIn(f"of {self.OBSERVED_MONTHLY_BYTES} declared bytes", str(caught.exception))
+        self.assertEqual(self.part_files(), [])
+        self.assertFalse(self.destination().exists())
 
 
 class HappyPathTests(DownloadTestCase):

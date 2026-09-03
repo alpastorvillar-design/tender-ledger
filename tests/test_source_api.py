@@ -9,24 +9,26 @@ import json
 import threading
 import time
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ted_fixtures import DEFAULT_OJS, FakeTransport, api_page, raw_page, search_body
+from tender_ledger.package_contract import UnsupportedPackage
 from tender_ledger.source_api import (
     Budgets,
     Clock,
+    PackageQuery,
     SourceUnavailable,
     TransientSourceError,
-    UnsupportedPackage,
     UrllibTransport,
-    daily_package_query,
+    budgets_for,
     enumerate_publication_keys,
     keys_digest,
+    package_query,
     parse_retry_after,
 )
 
-QUERY = daily_package_query("daily/202300220")
+QUERY = package_query("daily/202300220")
 
 
 class FakeClock(Clock):
@@ -72,13 +74,13 @@ def fails(script, **kwargs):
 
 class PackageQueryTests(unittest.TestCase):
     def test_daily_identity_is_an_issue_ordinal_not_a_day(self):
-        query = daily_package_query("daily/202300220")
+        query = package_query("daily/202300220")
         self.assertEqual(query.ojs_number, "220/2023")
         self.assertEqual(query.expression, "OJ = 220/2023")
         self.assertEqual(query.scope, "ALL")
-        self.assertEqual(daily_package_query("daily/202000001").expression, "OJ = 1/2020")
+        self.assertEqual(package_query("daily/202000001").expression, "OJ = 1/2020")
 
-    def test_only_canonical_daily_identities_are_supported(self):
+    def test_only_canonical_package_identities_are_supported(self):
         for value in (
             "daily/2023220",       # the OJS number is five digits, not three
             "daily/2023002200",    # too long
@@ -90,7 +92,182 @@ class PackageQueryTests(unittest.TestCase):
             "",
         ):
             with self.subTest(value=value), self.assertRaises(UnsupportedPackage):
-                daily_package_query(value)
+                package_query(value)
+
+
+class MonthlyQueryTests(unittest.TestCase):
+    def test_a_monthly_identity_asks_for_its_whole_inclusive_interval(self):
+        query = package_query("monthly/2020-02")
+        self.assertEqual(query.expression, "PD>=20200201 AND PD<=20200229")
+        self.assertEqual(query.scope, "ALL")
+        self.assertIsNone(query.ojs_number)
+        self.assertEqual(
+            query.publication_interval, (date(2020, 2, 1), date(2020, 2, 29))
+        )
+
+    def test_a_query_without_a_per_record_rule_cannot_be_built(self):
+        # Set equality proves two sets match, not that the source enumerated the
+        # window that was asked for. A query with no membership rule would make
+        # that the only evidence, so it is refused at construction.
+        with self.assertRaisesRegex(ValueError, "membership"):
+            PackageQuery(source_package_id="daily/202300220", expression="OJ = 220/2023")
+        with self.assertRaisesRegex(ValueError, "membership"):
+            PackageQuery(
+                source_package_id="daily/202300220", expression="OJ = 220/2023",
+                ojs_number="220/2023",
+                publication_interval=(date(2023, 11, 1), date(2023, 11, 30)),
+            )
+
+    def test_membership_is_decided_by_the_identity_not_by_the_echoed_expression(self):
+        query = package_query("monthly/2023-11")
+        self.assertIsNone(query.membership_error("999/2023", date(2023, 11, 1)))
+        self.assertIsNone(query.membership_error("1/2023", date(2023, 11, 30)))
+        for outside in (date(2023, 10, 31), date(2023, 12, 1)):
+            with self.subTest(outside=outside):
+                self.assertIn(
+                    "outside", query.membership_error("220/2023", outside)
+                )
+
+    def test_a_daily_query_still_decides_membership_by_the_issue_ordinal(self):
+        query = package_query("daily/202300220")
+        self.assertIsNone(query.membership_error(DEFAULT_OJS, date(1999, 1, 1)))
+        self.assertIn("not 220/2023", query.membership_error("221/2023", date(2023, 11, 15)))
+
+
+class NoticeBudgetTests(unittest.TestCase):
+    """The announced total of a real month has to fit the monthly budget only.
+
+    Both counts are ones the API actually reported for the rehearsal packages, so
+    this fixes the ceiling against observed volume rather than a round number.
+    """
+
+    OBSERVED = {"monthly/2020-01": 50_123, "monthly/2024-01": 65_708}
+
+    def page(self, total, *, publication_date):
+        return api_page(
+            [1], total=total, token="page-2", publication_date=publication_date, ojs="1/2024"
+        )
+
+    def test_a_daily_budget_refuses_a_month_sized_total_on_the_first_page(self):
+        for package, total in self.OBSERVED.items():
+            with self.subTest(package=package):
+                transport = FakeTransport([self.page(total, publication_date="2024-01-02Z")])
+                with self.assertRaises(SourceUnavailable) as caught:
+                    enumerate_publication_keys(
+                        transport, package_query("monthly/2024-01"),
+                        budgets=budgets_for("daily/202300220"), clock=FakeClock(),
+                    )
+                self.assertIn(f"the source reports {total} notices", str(caught.exception))
+                self.assertIn("over the 10000 budget", str(caught.exception))
+                self.assertEqual(len(transport.requests), 1)
+
+    def test_the_monthly_budget_accepts_the_same_totals_and_keeps_walking(self):
+        for package, total in self.OBSERVED.items():
+            with self.subTest(package=package):
+                transport = FakeTransport([
+                    self.page(total, publication_date="2024-01-02Z"),
+                    api_page([], total=total, token="still-here"),
+                ])
+                with self.assertRaises(SourceUnavailable) as caught:
+                    enumerate_publication_keys(
+                        transport, package_query("monthly/2024-01"),
+                        budgets=budgets_for(package), clock=FakeClock(),
+                    )
+                # The walk got past the ceiling and stopped only because the
+                # scripted source delivered one record of that total, not
+                # because of a budget.
+                self.assertNotIn("budget", str(caught.exception))
+                self.assertIn(
+                    f"stopped after 1 records (1 distinct) for a reported total of {total}",
+                    str(caught.exception),
+                )
+                self.assertEqual(len(transport.requests), 2)
+
+    def test_the_monthly_page_ceiling_covers_the_monthly_notice_ceiling(self):
+        budgets = budgets_for("monthly/2020-01")
+        self.assertGreaterEqual(
+            budgets.max_pages * budgets.page_size, budgets.max_notices + budgets.page_size
+        )
+
+
+class MonthlyMembershipTests(unittest.TestCase):
+    """Every record of a monthly enumeration has to belong to the month asked for."""
+
+    def walk(self, script, *, package="monthly/2023-11"):
+        transport = FakeTransport(script)
+        return enumerate_publication_keys(
+            transport, package_query(package),
+            budgets=Budgets(page_size=2, backoff_base_seconds=1.0), clock=FakeClock(),
+        )
+
+    def fails(self, script, **kwargs):
+        try:
+            self.walk(script, **kwargs)
+        except SourceUnavailable as exc:
+            return exc
+        raise AssertionError("the enumeration was expected to fail")
+
+    def test_both_edges_of_the_month_are_inside_it(self):
+        result = self.walk([
+            api_page([1], total=2, token="p2", publication_date="2023-11-01+01:00"),
+            api_page([2], total=2, token="p3", publication_date="2023-11-30Z"),
+            api_page([], total=2, token="still-here"),
+        ])
+        self.assertTrue(result.complete)
+        self.assertEqual(result.keys, {(2023, 1), (2023, 2)})
+
+    def test_one_day_outside_the_month_on_either_side_never_verifies(self):
+        for outside in ("2023-10-31Z", "2023-12-01Z"):
+            with self.subTest(outside=outside):
+                exc = self.fails([api_page([1], total=1, publication_date=outside)])
+                self.assertIn("outside 2023-11-01..2023-11-30", str(exc))
+
+    def test_a_missing_or_unparseable_publication_date_never_verifies(self):
+        exc = self.fails([api_page([1], total=1, publication_date="2023-11-32Z")])
+        self.assertIn("is not a calendar date", str(exc))
+        exc = self.fails([raw_page(json.dumps({
+            "notices": [{"publication-number": "1-2023", "ojs-number": "220/2023"}],
+            "totalNoticeCount": 1, "timedOut": False,
+        }).encode())])
+        self.assertIn("missing publication-date", str(exc))
+
+    def test_a_monthly_walk_ignores_the_issue_a_record_came_from(self):
+        # A month spans many OJ S issues, so ojs-number carries no membership
+        # information here and must not be turned into one.
+        result = self.walk([
+            api_page([1], total=2, token="p2", ojs="211/2023",
+                     publication_date="2023-11-02Z"),
+            api_page([2], total=2, token="p3", ojs="230/2023",
+                     publication_date="2023-11-29Z"),
+            api_page([], total=2, token="still-here"),
+        ])
+        self.assertTrue(result.complete)
+
+    def test_the_safe_endings_still_apply_to_a_monthly_walk(self):
+        cases = {
+            "duplicate": ([api_page([1, 1], total=2, publication_date="2023-11-02Z"),
+                           api_page([], total=2)], "stopped after 2 records"),
+            "changing total": ([api_page([1], total=2, token="p2",
+                                         publication_date="2023-11-02Z"),
+                               api_page([2], total=3, publication_date="2023-11-03Z")],
+                               "total changed"),
+            "repeated token": ([api_page([1], total=3, token="same",
+                                         publication_date="2023-11-02Z"),
+                               api_page([2], total=3, token="same",
+                                        publication_date="2023-11-03Z")],
+                               "repeated an iteration token"),
+            "premature end": ([api_page([1], total=9, token=None,
+                                        publication_date="2023-11-02Z")],
+                              "ended without a token"),
+        }
+        for name, (script, message) in cases.items():
+            with self.subTest(case=name):
+                self.assertIn(message, str(self.fails(script)))
+
+    def test_an_empty_month_is_reported_as_such_and_never_as_coverage(self):
+        result = self.walk([api_page([], total=0)])
+        self.assertTrue(result.complete)
+        self.assertEqual((result.announced_total, result.keys), (0, set()))
 
 
 class PaginationTests(unittest.TestCase):

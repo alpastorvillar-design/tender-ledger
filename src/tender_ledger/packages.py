@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from .package_contract import DAILY_POLICY, ResourcePolicy, policy_for
+
 
 class PackageError(ValueError):
     """An archive violates the supported source contract or resource limits."""
@@ -30,15 +32,36 @@ class NoticeKey:
 
 @dataclass(frozen=True)
 class Limits:
-    compressed_bytes: int = 64 * 1024 * 1024
-    expanded_bytes: int = 512 * 1024 * 1024
-    member_bytes: int = 8 * 1024 * 1024
-    notices: int = 10_000
+    """This layer's view of a package's resource policy.
+
+    The production values come from :mod:`package_contract`, so a daily and a
+    monthly archive are validated against ceilings that are decided in one place.
+    Tests construct small limits explicitly.
+    """
+
+    compressed_bytes: int = DAILY_POLICY.compressed_bytes
+    expanded_bytes: int = DAILY_POLICY.expanded_bytes
+    member_bytes: int = DAILY_POLICY.member_bytes
+    notices: int = DAILY_POLICY.notices
 
     def __post_init__(self) -> None:
         values = (self.compressed_bytes, self.expanded_bytes, self.member_bytes, self.notices)
         if min(values) <= 0:
             raise ValueError("All archive limits must be positive")
+
+
+def limits_from(policy: ResourcePolicy) -> Limits:
+    return Limits(
+        compressed_bytes=policy.compressed_bytes,
+        expanded_bytes=policy.expanded_bytes,
+        member_bytes=policy.member_bytes,
+        notices=policy.notices,
+    )
+
+
+def limits_for(source_package_id: str) -> Limits:
+    """The archive limits this package identity is allowed to cost."""
+    return limits_from(policy_for(source_package_id))
 
 
 LEGACY_ROOTS = {

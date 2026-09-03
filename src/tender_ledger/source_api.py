@@ -1,9 +1,11 @@
-"""Bounded enumeration of one OJ S issue from the TED Search API.
+"""Bounded enumeration of one package's publication window from the TED Search API.
 
 The verifier needs exactly one thing from the network: every canonical
-publication identifier the API reports for one daily package, or a failure that
-cannot be mistaken for a complete answer. Everything here exists to make the
-second case impossible to confuse with the first.
+publication identifier the API reports for one package, or a failure that cannot
+be mistaken for a complete answer. Everything here exists to make the second case
+impossible to confuse with the first. A daily package is one OJ S issue; a
+monthly one is a calendar interval, and each record has to prove it belongs to
+the window that was asked for.
 
 Pagination is the whole difficulty. The observed API keeps returning a non-empty
 ``iterationNextToken`` on the page after the last record, and the final page of
@@ -38,6 +40,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Protocol
 
+from .package_contract import DAILY_POLICY, ResourcePolicy, package_identity, policy_for
+
 SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
 VERIFIER_VERSION = "1"
 
@@ -48,7 +52,6 @@ KEY_DIGEST_RECIPE = 'sha256 of "<year>:<number>" lines, keys sorted ascending, j
 _FIELDS = ("publication-number", "publication-date", "ojs-number")
 _USER_AGENT = "tender-ledger/0.1 (+https://github.com/alpastorvillar-design/tender-ledger)"
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
-_DAILY_PACKAGE = re.compile(r"daily/(?P<year>[0-9]{4})(?P<ojs>[0-9]{5})")
 _PUBLICATION_NUMBER = re.compile(r"(?P<number>[0-9]{1,12})-(?P<year>[0-9]{4})")
 
 
@@ -73,61 +76,107 @@ class TransientSourceError(SourceUnavailable):
         self.retry_after = retry_after
 
 
-class UnsupportedPackage(ValueError):
-    """This package identity has no supported Search API query."""
-
-
 @dataclass(frozen=True)
 class PackageQuery:
-    """The one query a package identity is allowed to produce."""
+    """The one query a package identity is allowed to produce, and the rule every
+    record it returns has to satisfy.
+
+    The query is derived, never supplied: a filter chosen by hand could certify a
+    subset while reporting coverage of a whole package. Set equality alone is not
+    enough either -- it says two sets match, not that the source enumerated the
+    window that was asked for -- so a query without a per-record membership rule
+    is refused at construction.
+    """
 
     source_package_id: str
-    ojs_number: str  # "220/2023", the form the API returns in ojs-number
     expression: str
     scope: str = "ALL"
+    #: Daily: the "220/2023" every record must carry in ``ojs-number``.
+    ojs_number: str | None = None
+    #: Monthly: the inclusive calendar interval every record must fall in.
+    publication_interval: tuple[date, date] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.ojs_number is None) == (self.publication_interval is None):
+            raise ValueError(
+                "a package query needs exactly one per-record membership rule"
+            )
+
+    def membership_error(self, ojs_number: str, published_on: date) -> str | None:
+        """Why this record does not belong to the requested window, or None.
+
+        A daily package is one discrete issue, so the issue identifier is the
+        proof. A month has no such ordinal, so the calendar interval takes its
+        place; the interval is derived from the identity, never read back from
+        the expression the source echoes.
+        """
+        if self.ojs_number is not None:
+            if ojs_number != self.ojs_number:
+                return f"a notice belongs to OJ S {ojs_number}, not {self.ojs_number}"
+            return None
+        first, last = self.publication_interval
+        if not first <= published_on <= last:
+            return (
+                f"a notice published on {published_on.isoformat()} is outside"
+                f" {first.isoformat()}..{last.isoformat()}"
+            )
+        return None
 
 
-def daily_package_query(source_package_id: str) -> PackageQuery:
-    """Derive the Search API query for one daily package identity.
+def package_query(source_package_id: str) -> PackageQuery:
+    """Derive the Search API query for one canonical package identity.
 
     ``daily/202300220`` is OJ S issue 220 of 2023 -- an issue ordinal, not the
-    220th day of that year. Only this identity shape is supported, and the query
-    is derived from it rather than accepted from a caller: a verification that
-    could be narrowed by hand could certify a subset while reporting coverage of
-    the whole issue.
+    220th day of that year -- and asks ``OJ = 220/2023``. ``monthly/2020-02``
+    asks for the month's whole inclusive interval, leap year included.
     """
-    match = _DAILY_PACKAGE.fullmatch(source_package_id)
-    if match is None:
-        raise UnsupportedPackage(
-            f"{source_package_id!r} is not a canonical daily package identity"
-            " (expected daily/YYYYNNNNN)"
-        )
-    year, ojs = int(match["year"]), int(match["ojs"])
-    if not 1990 <= year <= 2099 or ojs < 1:
-        raise UnsupportedPackage(
-            f"{source_package_id!r} carries an implausible issue {ojs} of {year}"
-        )
+    identity = package_identity(source_package_id)
     return PackageQuery(
-        source_package_id=source_package_id,
-        ojs_number=f"{ojs}/{year}",
-        expression=f"OJ = {ojs}/{year}",
+        source_package_id=identity.source_package_id,
+        expression=identity.query_expression,
+        ojs_number=identity.ojs_number,
+        publication_interval=identity.publication_interval,
     )
 
 
 @dataclass(frozen=True)
 class Budgets:
-    """Hard limits on one verification. Exhausting any of them is a failure, not
-    a result: the walk stops without a set it can compare."""
+    """This layer's view of a package's resource policy.
 
-    max_notices: int = 10_000
-    page_size: int = 250
-    max_pages: int = 50
-    max_page_attempts: int = 3
-    max_response_bytes: int = 4 * 1024 * 1024
-    total_seconds: float = 300.0
-    operation_timeout: float = 20.0
-    backoff_base_seconds: float = 1.0
-    backoff_max_seconds: float = 30.0
+    Exhausting any of them is a failure, not a result: the walk stops without a
+    set it can compare. The production values come from :mod:`package_contract`,
+    so the notice ceiling here cannot drift from the one the archive walker
+    enforces; tests inject small budgets explicitly.
+    """
+
+    max_notices: int = DAILY_POLICY.notices
+    page_size: int = DAILY_POLICY.api_page_size
+    max_pages: int = DAILY_POLICY.api_max_pages
+    max_page_attempts: int = DAILY_POLICY.api_page_attempts
+    max_response_bytes: int = DAILY_POLICY.api_response_bytes
+    total_seconds: float = DAILY_POLICY.api_seconds
+    operation_timeout: float = DAILY_POLICY.operation_timeout
+    backoff_base_seconds: float = DAILY_POLICY.backoff_base_seconds
+    backoff_max_seconds: float = DAILY_POLICY.backoff_max_seconds
+
+
+def budgets_from(policy: ResourcePolicy) -> Budgets:
+    return Budgets(
+        max_notices=policy.notices,
+        page_size=policy.api_page_size,
+        max_pages=policy.api_max_pages,
+        max_page_attempts=policy.api_page_attempts,
+        max_response_bytes=policy.api_response_bytes,
+        total_seconds=policy.api_seconds,
+        operation_timeout=policy.operation_timeout,
+        backoff_base_seconds=policy.backoff_base_seconds,
+        backoff_max_seconds=policy.backoff_max_seconds,
+    )
+
+
+def budgets_for(source_package_id: str) -> Budgets:
+    """The enumeration budgets this package identity is allowed to cost."""
+    return budgets_from(policy_for(source_package_id))
 
 
 class Clock:
@@ -298,7 +347,7 @@ def _decode(body: bytes) -> dict:
     return data
 
 
-def _page_keys(data: dict, expected_ojs: str) -> tuple[list[tuple[int, int]], int]:
+def _page_keys(data: dict, query: PackageQuery) -> tuple[list[tuple[int, int]], int]:
     """Validate one page against the documented contract and return its keys and total."""
     if data.get("timedOut") is not False:
         raise SourceUnavailable(f"the source reported timedOut={data.get('timedOut')!r}")
@@ -317,17 +366,16 @@ def _page_keys(data: dict, expected_ojs: str) -> tuple[list[tuple[int, int]], in
         missing = [name for name in _FIELDS if not isinstance(notice.get(name), str)]
         if missing:
             raise SourceUnavailable(f"a notice entry is missing {', '.join(missing)}")
-        if notice["ojs-number"] != expected_ojs:
-            raise SourceUnavailable(
-                f"a notice belongs to OJ S {notice['ojs-number']}, not {expected_ojs}"
-            )
         try:
             # The suffix ("+01:00", "Z") does not change the calendar date.
-            date.fromisoformat(notice["publication-date"][:10])
+            published_on = date.fromisoformat(notice["publication-date"][:10])
         except ValueError as exc:
             raise SourceUnavailable(
                 f"publication-date {notice['publication-date']!r} is not a calendar date"
             ) from exc
+        outside = query.membership_error(notice["ojs-number"], published_on)
+        if outside is not None:
+            raise SourceUnavailable(outside)
         match = _PUBLICATION_NUMBER.fullmatch(notice["publication-number"])
         if match is None or int(match["number"]) == 0:
             raise SourceUnavailable(
@@ -444,7 +492,7 @@ def _walk(
 
         data = _fetch_page(transport, url, payload, budgets, deadline, clock, observed)
         observed.pages_fetched += 1
-        keys, total = _page_keys(data, query.ojs_number)
+        keys, total = _page_keys(data, query)
 
         if observed.announced_total is None:
             observed.announced_total = total

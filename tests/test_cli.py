@@ -152,7 +152,7 @@ class CliTests(unittest.TestCase):
             "--data-dir", str(self.dir / "data"),
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("canonical daily package identity", result.stderr)
+        self.assertIn("canonical package identity", result.stderr)
         self.assertFalse((self.dir / "data").exists())
         self.assertEqual(
             self.conn.execute("select count(*) from tl_work.ingest_run").fetchone()[0], 0

@@ -121,8 +121,8 @@ is `false` on the views, on `status`, and on the `LoadResult` returned by `load`
 
 ```sh
 python -m tender_ledger db upgrade
-python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220
-python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220 --force-recapture
+python -m tender_ledger load path/to/package.tar.gz --package-id daily/202300220
+python -m tender_ledger load path/to/package.tar.gz --package-id daily/202300220 --force-recapture
 python -m tender_ledger verify --capture-id 1
 python -m tender_ledger status --package-id daily/202300220
 python -m tender_ledger ingest --package-id daily/202300220   # all of the above, checkpointed
@@ -141,6 +141,7 @@ the local `.env`; see `config.py`.
 
 Annual partitioning (the baseline keeps year in the natural key so a partitioned
 table can be proven equivalent later), indexes tuned against measured plans, the
-six-query workload and its benchmark, monthly packages, backfill, and Airflow.
+six-query workload and its benchmark, backfill over several packages, and
+Airflow.
 The HTTP downloader and the coverage checkpoint now exist; see
 [ingestion.md](ingestion.md).

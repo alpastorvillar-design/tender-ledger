@@ -1,9 +1,10 @@
 # Source coverage verification
 
-Status: implemented for one published daily capture at a time, against the TED
-Search API. Downloading packages over HTTP and refusing to treat one as
-processed until its coverage is confirmed are implemented on top of this, in
-[ingestion.md](ingestion.md). Historical coverage and benchmarks are later.
+Status: implemented for one published capture at a time, daily or monthly,
+against the TED Search API. Downloading packages over HTTP and refusing to treat
+one as processed until its coverage is confirmed are implemented on top of this,
+in [ingestion.md](ingestion.md). Historical coverage and benchmarks are later.
+Only a daily capture has ever been verified against the live source.
 
 "The archive loaded completely" and "the source agrees this is the whole issue"
 are different claims. The loader establishes the first. `verify` is what can
@@ -17,10 +18,34 @@ python -m tender_ledger verify --capture-id 1
 
 The capture's own identity produces the query. `daily/202300220` is OJ S issue
 **220 of 2023** — an issue ordinal, not the 220th day of the year — so the query
-is `OJ = 220/2023` with `scope: ALL`. Nothing about the query can be supplied on
-the command line: a filter chosen by hand could certify a subset while reporting
-coverage of a whole issue. Package identities that do not fit
-`daily/YYYYNNNNN` are refused rather than guessed at.
+is `OJ = 220/2023` with `scope: ALL`. `monthly/2020-02` asks for that month's
+whole inclusive interval, `PD>=20200201 AND PD<=20200229`, with the last day
+computed rather than written down. Nothing about the query can be supplied on the
+command line: a filter chosen by hand could certify a subset while reporting
+coverage of a whole package. Identities that fit neither `daily/YYYYNNNNN` nor
+`monthly/YYYY-MM` are refused rather than guessed at.
+
+### Membership, not just set equality
+
+Matching sets prove that two collections agree. They do not prove the source
+enumerated the window that was asked for. Each answer therefore has to belong to
+the requested package before it can count:
+
+* a daily record must carry the expected `ojs-number`, exactly as before;
+* a monthly record must carry a parseable `publication-date` whose calendar day
+  falls inside the derived interval, first and last day included.
+
+The rule comes from the identity, never from the expression the source echoes
+back, and a query cannot even be constructed without one of the two rules. The
+first record that fails leaves the attempt `unavailable`. A month spans many OJ S
+issues, so `ojs-number` carries no membership information there and is not turned
+into one; a daily package gets no date rule invented for it.
+
+The Search API documents the ITERATION mode and the page size but not its date
+operators, their inclusivity or their time-zone handling. The interval predicate
+therefore rests on observed behaviour, which is why both edges of a month, a
+February in a leap year and one outside it are acceptance tests rather than an
+assumption.
 
 The verifier compares the identifiers of **that capture**, not
 `tl_read.distinct_notice`. Daily and monthly packages overlap, so a notice
@@ -80,17 +105,20 @@ newlines; every attempt stores that recipe alongside the digest.
 
 ## Budgets and retries
 
-| Budget | Value |
-| --- | --- |
-| Notices in one verification | 10,000 |
-| Page size | 250 |
-| Pages | 50 |
-| Attempts per page | 3 |
-| Response body | 4 MiB |
-| Total run | 300 s |
-| One HTTP operation | 20 s, capped by the time left |
+| Budget | daily | monthly |
+| --- | --- | --- |
+| Notices in one verification | 10,000 | 150,000 |
+| Page size | 250 | 250 |
+| Pages | 50 | 620 |
+| Attempts per page | 3 | 3 |
+| Response body | 4 MiB | 4 MiB |
+| Total run | 300 s | 1,800 s |
+| One HTTP operation | 20 s, capped by the time left | 20 s |
 
-All of them are injectable, and tests drive each one. Exhausting any budget is
+These come from the same per-kind policy the archive walker and the downloader
+read, so the notice ceiling here cannot drift from the one that admitted the
+archive — see [the resource policy](ingestion.md#resource-policy). All of them
+are injectable, and tests drive each one. Exhausting any budget is
 `unavailable`; a budget can never produce a result.
 
 Connection failures, timeouts and HTTP 408/429/500/502/503/504 get up to three

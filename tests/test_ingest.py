@@ -35,7 +35,7 @@ from tender_ledger.db import repository as repo
 from tender_ledger.download import DownloadBudgets, artifact_destination
 from tender_ledger.ingest import ingest_package
 from tender_ledger.loader import load_package
-from tender_ledger.source_api import UnsupportedPackage
+from tender_ledger.package_contract import UnsupportedPackage
 from tender_ledger.verification import verify_capture
 
 PACKAGE = "daily/202300220"

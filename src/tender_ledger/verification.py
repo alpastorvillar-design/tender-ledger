@@ -39,9 +39,9 @@ from .source_api import (
     SourceUnavailable,
     Transport,
     UrllibTransport,
-    daily_package_query,
     enumerate_publication_keys,
     keys_digest,
+    package_query,
 )
 
 #: Differences are reported as counts plus a bounded, ordered illustration.
@@ -113,7 +113,7 @@ def verify_capture(
     """Verify one published capture and return the attempt as it was persisted."""
     repo.require_transaction_owner(conn)
     capture = _verifiable_capture(conn, capture_id)
-    query = daily_package_query(capture.source_package_id)
+    query = package_query(capture.source_package_id)
 
     repo.acquire_lock(conn, capture.source_package_id, wait=lock_wait)
     try:

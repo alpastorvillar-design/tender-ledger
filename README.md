@@ -6,10 +6,12 @@ A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 
 **Status:** the archive inspector, a transactional package loader into
 PostgreSQL, coverage verification of a loaded capture against the TED Search API,
-and a daily ingest command that acquires a package and checkpoints it only when
-both hold are implemented. Lint and all 256 tests pass locally against real
-PostgreSQL, without skipped tests; the badge above reports the latest CI run on
-`main`. The historical run, benchmarks, and orchestration are still pending.
+and an ingest command that acquires one package and checkpoints it only when both
+hold are implemented, for daily and monthly package identities. Lint and the full
+test suite pass locally against real PostgreSQL, without skipped tests; the badge
+above reports the latest CI run on `main`. Only a daily package has been acquired
+from TED so far. The historical run, benchmarks, and orchestration are still
+pending.
 
 ## Problem
 
@@ -33,6 +35,7 @@ without double counting overlapping source packages.
 | Explicit coverage state | Verified, mismatch, unavailable and unconfirmed-empty are four different answers, each with its recorded evidence |
 | Bounded, recoverable package download | Truncation, oversized bodies, redirects off-origin, corrupt archives and 404s are all refused; interruptions restart from byte zero |
 | A checkpoint that only a complete flow can seal | Validated artifact plus published capture plus a named verified attempt, re-checked in one transaction and read back |
+| One resource policy per package kind | Archive, download and Search API limits are derived from the package identity, with their coherence asserted at construction |
 
 ## Architecture
 
@@ -114,7 +117,7 @@ PYTHONPATH=src python -m unittest discover -s tests -p test_projection.py -v
 
 The inspector prints a JSON summary with checksums, distinct notice counts, formats, and schema versions. Invalid archives exit with a nonzero status. It checks gzip integrity, duplicate identities, supported roots, required identity fields, and configured resource limits without extracting XML files to disk.
 
-Defaults are 64 MiB compressed, 512 MiB expanded, 8 MiB per member, and 10,000 notices. Limits are explicit CLI options; see `inspect --help`. The identity set uses memory proportional to the notice limit. This bounded inspector is not the historical database loader or a full XML-schema validator.
+Pass `--package-id daily/202300220` or `--package-id monthly/2020-01` to check the archive against that package kind's own policy; without one, the flags default to the daily ceilings of 64 MiB compressed, 512 MiB expanded, 8 MiB per member, and 10,000 notices. With an identity the policy is the maximum: a `--max-*` flag may narrow it and is refused if it would widen it. See `inspect --help`. The identity set uses memory proportional to the number of distinct notices in the archive. This bounded inspector is not the historical database loader or a full XML-schema validator.
 
 A successful inspection does not establish source completeness: the output always marks `source_coverage_verified` false. That is what `verify` is for, and an empty archive stays unconfirmed even then.
 
@@ -123,9 +126,13 @@ A successful inspection does not establish source completeness: the output alway
 After the quick start, load a local archive using its TED package identity:
 
 ```sh
-python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220
+python -m tender_ledger load path/to/package.tar.gz --package-id daily/202300220
 python -m tender_ledger status --package-id daily/202300220
 ```
+
+The identity selects the resource policy the archive is checked against, so a
+monthly package is not squeezed into daily ceilings and a daily one does not
+inherit monthly ones.
 
 The loader persists a capture identity before loading, streams and projects
 members (see [projection contract](docs/projection.md)), writes deterministic
@@ -168,7 +175,9 @@ package processed. This does:
 python -m tender_ledger ingest --package-id daily/202300220
 ```
 
-The URL is derived from the identity and cannot be supplied on the command line.
+The URL is derived from the identity — `monthly/2024-01` is fetched from the
+observed `packages/monthly/2024-1` and stored as `2024-01.tar.gz` — and cannot be
+supplied on the command line.
 The archive is streamed to a temporary file under byte and time budgets,
 validated as a complete gzip-tar package, fsynced and renamed into `data/`, and
 only then referenced in the database. The capture link is written in the same
@@ -257,15 +266,17 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
 
-1. Monthly packages and a bounded backfill over selected periods.
+1. A bounded backfill over an explicit list of packages.
 2. A measured rehearsal with at least 100,000 real notices, followed by at least
    one million distinct notices toward the 2020–2025 historical target.
 3. Six SQL workloads with correctness checks, query plans, storage measurements,
    and recovery results; then local Airflow orchestration.
 
-The current real-data validation covers one mixed day, loaded and verified. The
-ingest command processes one named daily package; there is no calendar, no
-backfill and no retention of old artifacts yet.
+The current real-data validation covers one mixed day, loaded and verified. No
+monthly package has been downloaded from TED: monthly identities, policies and
+membership rules are covered by fixtures and local servers only. The ingest
+command processes one named package; there is no calendar, no backfill and no
+retention of old artifacts yet.
 Historical completeness, large-dataset performance, and cloud execution have not
 been demonstrated. Coverage has been verified for that single capture; it says
 nothing about any other period.

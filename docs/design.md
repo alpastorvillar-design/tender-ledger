@@ -17,7 +17,7 @@ Observed on 2026-09-02:
 
 | Check | Result |
 | --- | --- |
-| `/packages/daily/202300220` | HTTP 200, gzip; the documented `/packages/notice/daily/...` variant returned 404 |
+| `/packages/daily/202300220` | HTTP 200, gzip; the narrated `/packages/notice/daily/...` variant returned 404, so the implementation keeps the observed endpoint shape |
 | 72 monthly HEAD requests, 2020–2025 | All HTTP 200; sum 16,783,140,714 compressed bytes |
 | Six annual API counts | 643,552; 676,734; 735,067; 795,680; 801,444; 871,149 |
 | Mixed package, 2023-11-15 | 2,967 XML members and distinct publication keys |

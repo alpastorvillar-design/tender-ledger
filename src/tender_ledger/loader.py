@@ -24,20 +24,10 @@ from pathlib import Path
 import psycopg
 
 from .db import repository as repo
-from .packages import Limits, PackageError, stream_notices
+from .packages import Limits, PackageError, limits_for, stream_notices
 from .projection import CONTRACT_VERSION, project_member
 
 _DEFAULT_BATCH_SIZE = 500
-
-# Daily packages hold a few thousand notices; monthly packages hold far more.
-# Large-scale uniqueness is the database primary key's job, so the stream's own
-# in-memory guard can be generous here.
-_LOADER_LIMITS = Limits(
-    compressed_bytes=1024 * 1024 * 1024,
-    expanded_bytes=8 * 1024 * 1024 * 1024,
-    member_bytes=32 * 1024 * 1024,
-    notices=2_000_000,
-)
 
 
 # A transient error leaves nothing about the capture wrong: the server dropped
@@ -111,7 +101,11 @@ def load_package(
     repo.require_transaction_owner(conn)
 
     path = Path(path)
-    limits = limits or _LOADER_LIMITS
+    # The archive is validated against the ceilings its own package identity is
+    # allowed to cost. A daily package therefore cannot be loaded through wider
+    # limits than the ones that acquired it, and an identity this contract does
+    # not recognize gets the narrowest policy rather than a permissive one.
+    limits = limits or limits_for(source_package_id)
     sha256, size = digest_archive(path)
 
     begin = repo.begin_capture(

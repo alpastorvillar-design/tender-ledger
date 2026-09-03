@@ -1,8 +1,10 @@
-"""Fetch one bounded TED daily package into a controlled data directory.
+"""Fetch one bounded TED package into a controlled data directory.
 
-The URL is derived from the package identity, never accepted from a caller: an
-arbitrary URL could put any bytes under a package's name. Tests inject a local
-origin through the ``url`` argument, which is not exposed on the command line.
+The URL, the destination and the byte and time budgets are all derived from the
+package identity, never accepted from a caller: an arbitrary URL could put any
+bytes under a package's name, and a hand-chosen budget could admit an archive the
+loader of that same package would refuse. Tests inject a local origin through the
+``url`` argument, which is not exposed on the command line.
 
 What makes a download usable is not HTTP 200. The body is streamed to an
 exclusive temporary file under fixed byte and time budgets, its declared length
@@ -34,15 +36,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .packages import Limits, PackageError, inspect_package
-from .source_api import Clock, daily_package_query, parse_retry_after
+from .package_contract import DAILY_POLICY, ResourcePolicy, package_identity, policy_for
+from .packages import Limits, PackageError, inspect_package, limits_from
+from .source_api import Clock, parse_retry_after
 
 PACKAGES_URL = "https://ted.europa.eu/packages"
-
-#: Resource limits for the daily flow. The historical loader raises its own
-#: limits for monthly archives; a daily package must not inherit those silently,
-#: so inspection, validation and loading all use this one value.
-DAILY_LIMITS = Limits()
 
 _USER_AGENT = "tender-ledger/0.1 (+https://github.com/alpastorvillar-design/tender-ledger)"
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
@@ -62,18 +60,40 @@ class TransientDownloadError(DownloadError):
 
 @dataclass(frozen=True)
 class DownloadBudgets:
-    """Hard limits on one acquisition. Exhausting any of them is a failure."""
+    """This layer's view of a package's resource policy.
 
-    max_attempts: int = 3
-    operation_timeout: float = 20.0
-    total_seconds: float = 300.0
-    max_artifact_bytes: int = 64 * 1024 * 1024
+    Exhausting any of them is a failure, not a result. The production values come
+    from :mod:`package_contract`; tests inject small ones explicitly.
+    """
+
+    max_attempts: int = DAILY_POLICY.download_attempts
+    operation_timeout: float = DAILY_POLICY.operation_timeout
+    total_seconds: float = DAILY_POLICY.download_seconds
+    max_artifact_bytes: int = DAILY_POLICY.compressed_bytes
     #: Across every attempt of one acquisition, so a source that keeps
     #: truncating cannot be retried into an unbounded transfer.
-    max_total_bytes: int = 192 * 1024 * 1024
-    chunk_bytes: int = 1024 * 1024
-    backoff_base_seconds: float = 1.0
-    backoff_max_seconds: float = 30.0
+    max_total_bytes: int = DAILY_POLICY.download_total_bytes
+    chunk_bytes: int = DAILY_POLICY.chunk_bytes
+    backoff_base_seconds: float = DAILY_POLICY.backoff_base_seconds
+    backoff_max_seconds: float = DAILY_POLICY.backoff_max_seconds
+
+
+def budgets_from(policy: ResourcePolicy) -> DownloadBudgets:
+    return DownloadBudgets(
+        max_attempts=policy.download_attempts,
+        operation_timeout=policy.operation_timeout,
+        total_seconds=policy.download_seconds,
+        max_artifact_bytes=policy.compressed_bytes,
+        max_total_bytes=policy.download_total_bytes,
+        chunk_bytes=policy.chunk_bytes,
+        backoff_base_seconds=policy.backoff_base_seconds,
+        backoff_max_seconds=policy.backoff_max_seconds,
+    )
+
+
+def budgets_for(source_package_id: str) -> DownloadBudgets:
+    """The acquisition budgets this package identity is allowed to cost."""
+    return budgets_from(policy_for(source_package_id))
 
 
 @dataclass(frozen=True)
@@ -89,23 +109,26 @@ class Artifact:
 
 
 def package_url(source_package_id: str) -> str:
-    """The one URL a supported package identity is allowed to produce."""
-    daily_package_query(source_package_id)  # raises UnsupportedPackage otherwise
-    return f"{PACKAGES_URL}/{source_package_id}"
+    """The one URL a supported package identity is allowed to produce.
+
+    The path segment is the identity's *derived* one: a monthly package keeps its
+    zero-padded internal identity but is fetched from the observed endpoint shape
+    without the padding.
+    """
+    return f"{PACKAGES_URL}/{package_identity(source_package_id).url_path}"
 
 
 def artifact_destination(data_root: Path, source_package_id: str) -> Path:
     """Where a package's bytes live under the data root.
 
-    The identity is validated first, so the path components are a fixed keyword
-    and nine digits. Containment is asserted anyway: this is the only function
+    The identity is validated first, so the path components come from a fullmatch
+    of a strict pattern. Containment is asserted anyway: this is the only function
     that turns an identity into a filesystem path, so it is the right place to
     make traversal impossible rather than merely unlikely.
     """
-    daily_package_query(source_package_id)
-    kind, _, ordinal = source_package_id.partition("/")
+    identity = package_identity(source_package_id)
     root = Path(data_root)
-    destination = root / "packages" / kind / f"{ordinal}.tar.gz"
+    destination = root.joinpath(*identity.destination_parts)
     if not destination.resolve().is_relative_to(root.resolve()):
         raise DownloadError(f"{source_package_id!r} resolves outside {root}")
     return destination
@@ -124,7 +147,7 @@ def validate_artifact(
     if not path.is_file():
         return None
     try:
-        summary = inspect_package(path, limits or DAILY_LIMITS)
+        summary = inspect_package(path, limits or Limits())
     except (PackageError, OSError):
         return None
     if expected_sha256 is not None and summary["sha256"] != expected_sha256:
@@ -152,9 +175,10 @@ def download_package(
     existing destination untouched; the rename is the only thing that changes
     what a reader of the data directory sees.
     """
-    budgets = budgets or DownloadBudgets()
+    policy = policy_for(source_package_id)
+    budgets = budgets or budgets_from(policy)
     clock = clock or Clock()
-    limits = limits or DAILY_LIMITS
+    limits = limits or limits_from(policy)
     url = url or package_url(source_package_id)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)

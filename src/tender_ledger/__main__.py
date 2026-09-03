@@ -1,5 +1,5 @@
 """Command-line entry point: inspect an archive, load one, verify its coverage,
-or run the whole daily flow and checkpoint it."""
+or run the whole flow for one package and checkpoint it."""
 
 import argparse
 import dataclasses
@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .packages import Limits, inspect_package
+from .packages import Limits, inspect_package, limits_for
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -18,10 +18,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "inspect", help="validate a local .tar.gz and print a summary"
     )
     inspect.add_argument("archive", type=Path)
-    inspect.add_argument("--max-compressed-mib", type=int, default=64)
-    inspect.add_argument("--max-expanded-mib", type=int, default=512)
-    inspect.add_argument("--max-member-mib", type=int, default=8)
-    inspect.add_argument("--max-notices", type=int, default=10_000)
+    inspect.add_argument(
+        "--package-id",
+        help="source package identity, e.g. daily/202300220 or monthly/2020-01;"
+             " it selects the resource policy the archive is checked against",
+    )
+    inspect.add_argument(
+        "--max-compressed-mib", type=int,
+        help="override the compressed ceiling (default 64, or the package policy)",
+    )
+    inspect.add_argument(
+        "--max-expanded-mib", type=int,
+        help="override the expanded ceiling (default 512, or the package policy)",
+    )
+    inspect.add_argument(
+        "--max-member-mib", type=int,
+        help="override the per-member ceiling (default 8, or the package policy)",
+    )
+    inspect.add_argument(
+        "--max-notices", type=int,
+        help="override the notice ceiling (default 10000, or the package policy)",
+    )
 
     db_cmd = commands.add_parser("db", help="database maintenance")
     db_sub = db_cmd.add_subparsers(dest="db_command", required=True)
@@ -31,7 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
     load.add_argument("archive", type=Path)
     load.add_argument(
         "--package-id", required=True,
-        help="source package identity, e.g. daily/202300220",
+        help="source package identity, e.g. daily/202300220 or monthly/2020-01;"
+             " it selects the resource policy the archive is checked against",
     )
     load.add_argument("--batch-size", type=int, default=500)
     load.add_argument(
@@ -45,11 +63,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ingest = commands.add_parser(
         "ingest",
-        help="download, load, verify and checkpoint one daily package",
+        help="download, load, verify and checkpoint one package",
     )
     ingest.add_argument(
         "--package-id", required=True,
-        help="source package identity, e.g. daily/202300220; it derives the URL",
+        help="source package identity, e.g. daily/202300220 or monthly/2020-01;"
+             " it derives the URL, the destination and the resource policy",
     )
     ingest.add_argument(
         "--data-dir", type=Path,
@@ -76,15 +95,42 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _inspection_limits(args: argparse.Namespace) -> Limits:
+    """Resolve the ceilings this inspection runs under.
+
+    With a package identity the policy is the maximum allowed: an explicit flag
+    may narrow it for an ad-hoc look at an archive, but widening it here would
+    let a hand-typed number approve bytes the loader of that same package would
+    refuse.
+    """
+    policy = limits_for(args.package_id) if args.package_id else Limits()
+    requested = {
+        "compressed_bytes": _mib(args.max_compressed_mib),
+        "expanded_bytes": _mib(args.max_expanded_mib),
+        "member_bytes": _mib(args.max_member_mib),
+        "notices": args.max_notices,
+    }
+    chosen = {}
+    for name, value in requested.items():
+        ceiling = getattr(policy, name)
+        if value is None:
+            chosen[name] = ceiling
+            continue
+        if args.package_id and value > ceiling:
+            raise ValueError(
+                f"{name} {value} is above the policy of {args.package_id!r} ({ceiling})"
+            )
+        chosen[name] = value
+    return Limits(**chosen)
+
+
+def _mib(value: int | None) -> int | None:
+    return None if value is None else value * 1024**2
+
+
 def _cmd_inspect(args: argparse.Namespace) -> int:
     try:
-        limits = Limits(
-            compressed_bytes=args.max_compressed_mib * 1024**2,
-            expanded_bytes=args.max_expanded_mib * 1024**2,
-            member_bytes=args.max_member_mib * 1024**2,
-            notices=args.max_notices,
-        )
-        result = inspect_package(args.archive, limits)
+        result = inspect_package(args.archive, _inspection_limits(args))
     except ValueError as exc:
         print(f"Inspection failed: {exc}", file=sys.stderr)
         return 1

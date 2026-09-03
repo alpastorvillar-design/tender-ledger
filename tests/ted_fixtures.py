@@ -80,6 +80,21 @@ def legacy_member(number, year=2023, *, namespace="R2.0.9",
     return f"{year}-220/{int(number):06d}_{year}.xml", xml.encode("utf-8")
 
 
+def padded_legacy_member(number, *, member_bytes, year=2023, **kwargs):
+    """A legacy notice padded with an XML comment to at least ``member_bytes``.
+
+    Used to tell one resource policy from another without moving real volume:
+    the padding is one repeated character, so the archive on disk stays tiny
+    while the member the walker must admit is deliberately large.
+    """
+    name, xml = legacy_member(number, year, **kwargs)
+    padding = max(0, member_bytes - len(xml))
+    if padding:
+        marker = b"<!--" + b"p" * padding + b"-->"
+        xml = xml.replace(b"</TED_EXPORT>", marker + b"</TED_EXPORT>")
+    return name, xml
+
+
 _UNSET = object()
 
 

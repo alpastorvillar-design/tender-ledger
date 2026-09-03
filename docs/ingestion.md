@@ -1,12 +1,15 @@
-# Daily package ingestion
+# Package ingestion
 
-Status: implemented for one daily package at a time. `ingest` acquires the
-archive over HTTPS, loads it with the transactional loader, verifies its coverage
-against the Search API, and seals a checkpoint. Monthly packages, a publication
-calendar, backfill, benchmarks and Airflow are later slices.
+Status: implemented for one package at a time, daily or monthly. `ingest`
+acquires the archive over HTTPS, loads it with the transactional loader, verifies
+its coverage against the Search API, and seals a checkpoint. A publication
+calendar, backfill over several packages, benchmarks and Airflow are later
+slices. No monthly package has been acquired from TED yet: monthly support is
+covered by fixtures and local servers, not by a real download.
 
 ```sh
 python -m tender_ledger ingest --package-id daily/202300220
+python -m tender_ledger ingest --package-id monthly/2020-01
 ```
 
 Exit code 0 means a checkpoint that is current in PostgreSQL, read back after
@@ -31,7 +34,7 @@ persist an ingest run (phase 'starting')
 download to .<name>.part-<token> ---> validate: length, sha256, gzip CRC, tar
       |                                trailer, member contract, byte limits
       v
-fsync, rename into data/packages/daily/<ordinal>.tar.gz
+fsync, rename into data/packages/<kind>/<ordinal>.tar.gz
       |
       v
 commit the artifact reference ------> phase 'artifact_ready'
@@ -130,26 +133,74 @@ freshness; periodic refresh is an orchestration decision. There is deliberately
 no `--refresh` or `--force` on `ingest`: re-acquisition stays the existing,
 explicit `load --force-recapture`, which correctly retires the checkpoint.
 
-## Download contract
+## Package identity
 
-The URL is derived from the package identity — `daily/202300220` becomes
-`https://ted.europa.eu/packages/daily/202300220` — and cannot be supplied on the
-command line. Only `daily/YYYYNNNNN` identities are supported; the ordinal is an
-OJ S issue, not a day of the year. There is no calendar here and no guessing at
-packages that do not exist.
+Two identity shapes are supported, and everything else about a package is
+derived from one of them:
 
-| Budget | Value |
-| --- | --- |
-| HTTP attempts per acquisition | 3 |
-| One HTTP operation | 20 s, capped by the time left |
-| Whole acquisition | 300 s |
-| One archive | 64 MiB compressed |
-| All attempts of one acquisition | 192 MiB received |
-| Expanded archive / member / notices | 512 MiB / 8 MiB / 10,000 |
+| Identity | Derived TED package path | Local file | Source query |
+| --- | --- | --- | --- |
+| `daily/YYYYNNNNN` | `/packages/daily/202300220` | `data/packages/daily/202300220.tar.gz` | `OJ = 220/2023` |
+| `monthly/YYYY-MM` | `/packages/monthly/2024-1` | `data/packages/monthly/2024-01.tar.gz` | `PD>=20240101 AND PD<=20240131` |
 
-The archive limits are the daily flow's own. The historical loader raises them
-for monthly packages; a daily package does not inherit that silently, so
-validation and loading use the same values.
+The daily ordinal is an OJ S issue, not a day of the year. The monthly month is
+always zero-padded — that matches TED's own `{yyyy}_{mm}` archive filename
+convention, and accepting `monthly/2024-1` as well would give one package two
+internal identities, two captures and two checkpoints. The path segment used to
+fetch it drops that zero.
+
+That path is the **observed endpoint shape**, not a documented one: the published
+direct-download page narrates a pattern containing `/notice/` that its own
+examples omit, and the endpoints that answer omit it too
+(`/packages/notice/daily/202300220` returned 404 where `/packages/daily/202300220`
+returned 200). `monthly/2020-1`, `monthly/2020-13`, an out-of-range year, a
+trailing space, a backslash and anything resembling traversal are refused rather
+than guessed at, and no URL, path or query can be supplied on the command line.
+
+There is no calendar here: `ingest` processes one named package.
+
+## Resource policy
+
+One policy per package kind is the single source of these numbers, and the
+archive walker, the downloader and the Search API client each build their own
+limits from it. Before that they carried three independent sets of defaults, and
+the same archive was validated against ceilings that differed by a factor of
+sixteen depending on which command opened it.
+
+| Budget | daily | monthly |
+| --- | --- | --- |
+| HTTP attempts per acquisition | 3 | 3 |
+| One HTTP operation | 20 s, capped by the time left | 20 s |
+| Whole acquisition | 300 s | 1,800 s |
+| One archive | 64 MiB compressed | 512 MiB |
+| All attempts of one acquisition | 192 MiB received | 1,536 MiB |
+| Expanded archive | 512 MiB | 8 GiB |
+| One member | 8 MiB | 32 MiB |
+| Notices / members | 10,000 | 150,000 |
+| Enumeration pages × page size | 50 × 250 | 620 × 250 |
+| Whole verification | 300 s | 1,800 s |
+
+Four invariants are asserted when a policy is constructed, so a future edit
+cannot produce a set of numbers that contradicts itself: every ceiling is
+positive; the aggregate byte budget funds every attempt of one artifact; the page
+ceiling covers the notice ceiling plus the terminal page; and one member cannot
+exceed the whole expanded archive. The archive and the source therefore always
+agree on the same notice ceiling, so an archive that loads can also be verified.
+
+These are safety ceilings, not targets, and nothing approves a load by being
+under them. The monthly numbers are derived from the 2020–2025 inventory that has
+been measured — 512 MiB is 1.23× the largest of 72 observed monthly headers — and
+have to be re-derived if the historical target grows past 2025. The expansion
+ceiling rests on the only expansion ratio ever measured (6.66×, on one mixed
+daily package). Expanded bytes are streamed and never written to disk, so that
+ceiling bounds work rather than storage.
+
+`inspect`, `load`, `verify` and `ingest` all resolve their policy from the
+identity, so no command can accept an archive another command would refuse.
+`inspect --package-id` treats the policy as the maximum: an explicit `--max-*`
+flag may narrow it for an ad-hoc look and is refused if it would widen it. An
+identity this contract does not recognize — `load` accepts any name for a local
+file — gets the *narrowest* policy, never a permissive one.
 
 Retried: connection failures, timeouts, HTTP 408/429/500/502/503/504, and a body
 that ends before its declared `Content-Length`. Not retried: a rejected TLS
@@ -179,7 +230,7 @@ over with a promise the transport cannot keep.
 ## Files
 
 Archives live under `data/` (ignored by Git), at
-`data/packages/daily/<ordinal>.tar.gz`. `--data-dir` moves the root. The path
+`data/packages/<kind>/<ordinal>.tar.gz`. `--data-dir` moves the root. The path
 comes from the validated identity, never from `Content-Disposition`, and
 containment inside the root is asserted where the path is built. Temporary files
 are exclusive to one attempt, sit beside the destination so the rename stays on
@@ -242,7 +293,7 @@ views and nothing else.
 
 ## Deliberately not done here
 
-Monthly packages, more than one package per invocation, a publication calendar,
-backfill, retention of old artifacts, the 100,000-notice rehearsal, the
-million-notice gate, the measured SQL workload, and Airflow. `ingest` processes
-one named daily package and says whether that package is processed.
+More than one package per invocation, a publication calendar, backfill,
+retention of old artifacts, the 100,000-notice rehearsal, the million-notice
+gate, the measured SQL workload, and Airflow. `ingest` processes one named
+package and says whether that package is processed.
