@@ -6,12 +6,10 @@ A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 
 **Status:** the archive inspector, a transactional package loader into
 PostgreSQL, and coverage verification of a loaded capture against the TED Search
-API are implemented. Lint and the full suite pass locally against a real
-PostgreSQL; the published
-[CI run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33703335177)
-covers the loader at 78 tests and predates the verifier. The HTTP package
-downloader, the historical run, benchmarks, and orchestration are still
-pending.
+API are implemented. Lint and all 174 tests pass locally and in
+[GitHub CI](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33760400881)
+against real PostgreSQL, without skipped tests. The HTTP package downloader,
+the historical run, benchmarks, and orchestration are still pending.
 
 ## Problem
 
@@ -186,8 +184,8 @@ grain and how it treats missing values.
 - A real mixed daily package contained **2,967 distinct notices**: 1,813 legacy and 1,154 eForms. Its complete identifier set matched the API across 12 pages.
 - The inspector processed that package successfully; its checks are covered by automated tests.
 - That same real package (2,967 notices, 1,813 legacy + 1,154 eForms) was loaded into PostgreSQL as an M1 smoke: members, distinct keys, and loaded rows all reconciled at 2,967, a replay was a no-op, and every view reported `source_coverage_verified = false`.
-- The full test suite is **174 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against a local test server and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses and unknown counts supporting a verification claim. The 78-test CI run linked above predates the verifier.
-- A **live verification** of that capture against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests over 7.3 s, with no duplicates and no difference on either side. It ran against a throwaway copy of the capture in a disposable database that was dropped afterwards; the development database was not modified. Its key digest equals the one an independent probe recorded for the same issue.
+- The full test suite is **174 tests**, run locally and in CI without skips: archive/projection tests, HTTP and pagination tests against a local test server and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses and unknown counts supporting a verification claim.
+- **Live verification** against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests, with no duplicates or differences. The check passed on a disposable copy before migration 0003 was applied to development. Verification of the development capture then committed `source_coverage_verified = true`, preserving all notice rows, batches, and the publication pointer. The canonical key digest matched earlier independent comparisons of the same issue.
 - An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
 
 Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03. No cloud deployment or historical performance benchmark has run.
@@ -218,13 +216,13 @@ python scripts/run_tests.py
 
 The test runner creates and replaces its dedicated test databases; use a local
 development server or disposable CI service. It does not target the development
-database. The first
-[GitHub-hosted run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33703335177)
-passed Ruff and all 78 tests on Ubuntu 24.04, Python 3.14.3, and PostgreSQL 17.11.
+database. The
+[GitHub-hosted verification run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33760400881)
+passed Ruff and all 174 tests on Ubuntu 24.04, Python 3.14.3, and PostgreSQL 17.11.
 
 ## Roadmap and limits
 
-1. Package download over HTTP with resumable integrity checks, and a coverage
+1. Package download over HTTP with bounded retries and integrity checks, and a coverage
    checkpoint that stops an automated workflow from treating an unverified
    window as processed.
 2. A measured rehearsal with at least 100,000 real notices, followed by at least
