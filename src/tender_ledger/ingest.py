@@ -55,7 +55,11 @@ from .verification import VERIFIED, verify_capture
 
 DEFAULT_BATCH_SIZE = 500
 
-_OPEN_PHASES = ("starting", "artifact_ready", "capture_published", "source_verified")
+#: How far a run has got, in order. 'failed' is outside it: terminal, not a step.
+_PHASE_ORDER = (
+    "starting", "artifact_ready", "capture_published", "source_verified", "completed"
+)
+_OPEN_PHASES = _PHASE_ORDER[:-1]
 _RUN_COLUMNS = (
     "run_id, source_package_id, attempt_ordinal, phase, artifact_path,"
     " artifact_sha256, artifact_bytes, capture_id, verification_attempt_id"
@@ -323,12 +327,23 @@ def _load(
     The capture link is written by ``on_capture`` inside the transaction that
     creates or resumes the capture, so an interruption before the first batch
     still leaves the run pointing at the right capture.
+
+    A resumed run can find a *different* capture here: while it waited, the
+    package may have been re-acquired and its own capture superseded. The link
+    therefore also drops a verification attempt that belonged to the capture it
+    is leaving. Keeping it would claim confirmed coverage for a capture nobody
+    checked -- and the composite foreign key would refuse the row anyway.
     """
     def link(inner: psycopg.Connection, capture: repo.Capture) -> None:
         inner.execute(
-            "update tl_work.ingest_run set capture_id = %s, updated_at = now()"
+            "update tl_work.ingest_run set capture_id = %s,"
+            " verification_attempt_id = case when capture_id is distinct from %s"
+            "     then null else verification_attempt_id end,"
+            " phase = case when capture_id is distinct from %s and phase = 'source_verified'"
+            "     then 'capture_published' else phase end,"
+            " updated_at = now()"
             " where run_id = %s",
-            (capture.capture_id, run.run_id),
+            (capture.capture_id,) * 3 + (run.run_id,),
         )
 
     result = load_package(
@@ -341,7 +356,13 @@ def _load(
             f"capture {result.capture_id} is {result.status!r}, not published: {reason}",
             terminal=result.status == "failed",
         )
-    return _set_phase(conn, run, "capture_published", capture_id=result.capture_id)
+    # Re-read: the link may have changed the capture and cleared the attempt.
+    # A run that had already verified this same capture keeps that phase rather
+    # than stepping backwards over work it does not have to redo.
+    run = _read_run(conn, run.run_id)
+    if run.capture_id != result.capture_id or _rank(run.phase) < _rank("capture_published"):
+        run = _set_phase(conn, run, "capture_published", capture_id=result.capture_id)
+    return run
 
 
 def _ensure_coverage(
@@ -487,6 +508,10 @@ def _open_run(conn: psycopg.Connection, source_package_id: str) -> tuple[_Run, b
             (source_package_id, source_package_id),
         ).fetchone()[0]
     return _read_run(conn, run_id), False
+
+
+def _rank(phase: str) -> int:
+    return _PHASE_ORDER.index(phase)
 
 
 def _read_run(conn: psycopg.Connection, run_id: int) -> _Run:

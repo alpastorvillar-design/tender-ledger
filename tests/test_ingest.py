@@ -592,6 +592,31 @@ class CoverageGateTests(IngestTestCase):
             self.checkpoint()["verification_attempt_id"], run["verification_attempt_id"]
         )
 
+    def test_a_pending_run_whose_capture_was_replaced_drops_the_stale_attempt(self):
+        with mock.patch.object(
+            ingest, "_seal", side_effect=psycopg.OperationalError("connection lost")
+        ), self.assertRaises(psycopg.OperationalError):
+            self.ingest()
+        pending = self.run_rows()[0]
+        self.assertEqual(pending["phase"], "source_verified")
+
+        # someone re-acquires the package from different bytes while the run waits
+        other = write_package(self.root / "other.tar.gz", [legacy_member(2001)])
+        replacement = load_package(
+            self.new_conn(), other, PACKAGE, force_recapture=True
+        )
+        self.assertEqual(replacement.status, "published")
+
+        resumed = self.ingest()
+        self.assertEqual(resumed.outcome, "processed")
+        self.assertEqual(resumed.run_id, pending["run_id"])
+        self.assertNotEqual(resumed.capture_id, pending["capture_id"])
+        self.assertNotEqual(
+            resumed.verification_attempt_id, pending["verification_attempt_id"]
+        )
+        self.assertEqual(self.checkpoint()["capture_id"], resumed.capture_id)
+        self.assertEqual(self.notices(), [f"{n}-2023" for n in self.NUMBERS])
+
     def test_a_lost_session_at_the_seal_reports_no_success_and_writes_no_checkpoint(self):
         victim = self.new_conn()
         killer = self.new_conn()
