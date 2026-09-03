@@ -251,8 +251,8 @@ python scripts/run_tests.py
 The test runner creates and replaces its dedicated test databases; use a local
 development server or disposable CI service. It does not target the development
 database. The most recent
-[GitHub-hosted verification run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33760400881)
-recorded here passed Ruff and 174 tests on Ubuntu 24.04, Python 3.14.3, and
+[GitHub-hosted verification run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33791641140)
+recorded here passed Ruff and 256 tests on Ubuntu 24.04, Python 3.14.3, and
 PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
