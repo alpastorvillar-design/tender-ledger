@@ -5,9 +5,8 @@ treats missing values, because most of the wrong answers available here come fro
 one of those two things rather than from the join.
 
 Everything counts **notices** — published procurement announcements. It does not
-count awards, contracts, lots, suppliers or money. A notice announces an
-intention or an outcome; it does not carry the value of a contract, and nothing
-in this schema does either.
+count awards, contracts, lots, suppliers or money. The current projection does
+not extract monetary amounts from notices.
 
 | File | Question | Grain |
 | --- | --- | --- |
@@ -42,7 +41,8 @@ The `tender_ledger_reader` role can run all of these; it has `SELECT` on the
 PowerShell:
 
 ```powershell
-docker compose exec -T postgres psql -U postgres -d tender_ledger -v ON_ERROR_STOP=1 -f - < queries/coverage_status.sql
+Get-Content -Raw .\queries\coverage_status.sql |
+    docker compose exec -T postgres psql -U postgres -d tender_ledger -v ON_ERROR_STOP=1 -f -
 ```
 
 POSIX shell:
@@ -51,7 +51,14 @@ POSIX shell:
 docker compose exec -T postgres psql -U postgres -d tender_ledger -v ON_ERROR_STOP=1 -f - < queries/coverage_status.sql
 ```
 
-To run one as the restricted reader, prefix the file with `SET ROLE`:
+To run one as the restricted reader in PowerShell:
+
+```powershell
+Get-Content -Raw .\queries\coverage_status.sql |
+    docker compose exec -T postgres psql -U postgres -d tender_ledger -v ON_ERROR_STOP=1 -c "set role tender_ledger_reader" -f -
+```
+
+In a POSIX shell:
 
 ```sh
 docker compose exec -T postgres psql -U postgres -d tender_ledger -v ON_ERROR_STOP=1 \

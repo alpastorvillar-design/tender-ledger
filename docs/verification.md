@@ -104,11 +104,14 @@ cannot be stitched onto identifiers from an earlier walk.
 
 The client is `urllib` from the standard library with a default TLS context,
 which validates the certificate chain and hostname. Its timeout applies to
-individual socket operations, not to a whole request, so the deadline is checked
-before every request and before every sleep but a request already in flight can
-overrun the total budget by up to one operation timeout. This is a bounded
-budget, not a hard deadline. There is no HTTP dependency to install, and CI
-never contacts TED.
+individual socket operations, not to a whole request. The deadline is checked
+before requests and sleeps, between bounded body reads, and before accepting a
+completed enumeration. A response received after the budget expires cannot
+verify coverage. A blocked socket read can delay cancellation by an operation
+timeout; DNS resolution and response-header parsing do not have a hard
+wall-clock deadline in urllib. There is no HTTP dependency to install, and CI
+never contacts TED. Premature EOF against a declared Content-Length is a
+transport failure, even if the received prefix is valid JSON.
 
 ## Transactions, locking and durability
 

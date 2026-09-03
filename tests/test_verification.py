@@ -28,6 +28,7 @@ from tender_ledger.db import repository as repo
 from tender_ledger.loader import digest_archive, load_package
 from tender_ledger.source_api import (
     Budgets,
+    Clock,
     SourceUnavailable,
     TransientSourceError,
     UnsupportedPackage,
@@ -237,6 +238,32 @@ class EmptyPeriodTests(VerificationTestCase):
 
 
 class UnavailableTests(VerificationTestCase):
+    def test_a_late_complete_response_cannot_persist_verified(self):
+        capture = self.publish(PACKAGE, [1])
+        clock = Clock()
+        elapsed = [0.0]
+        clock.monotonic = lambda: elapsed[0]
+
+        def late(_number):
+            elapsed[0] = 2.0
+
+        result = self.verify(
+            capture, [api_page([1], total=1, token=None)], clock=clock,
+            budgets=Budgets(total_seconds=1.0), before_request=late,
+        )
+        self.assertEqual(result.state, "unavailable")
+        self.assertFalse(self.coverage(capture))
+        self.assertEqual([a["state"] for a in self.attempts(capture)], ["unavailable"])
+
+    def test_same_page_duplicates_are_persisted_accurately(self):
+        capture = self.publish(PACKAGE, [1])
+        result = self.verify(capture, [
+            api_page([1, "000001"], total=2, token="end"), api_page([], total=2),
+        ])
+        self.assertEqual(result.state, "unavailable")
+        self.assertEqual((result.api_record_count, result.api_distinct_count,
+                          result.api_duplicate_count), (2, 1, 1))
+
     def test_a_transport_failure_records_the_attempt_without_a_difference(self):
         capture = self.publish(PACKAGE, [1, 2])
         result = self.verify(capture, [TransientSourceError("connection reset")] * 3)
@@ -555,6 +582,29 @@ class ConstraintTests(VerificationTestCase):
                 " where attempt_id = %s",
                 (attempt,),
             )
+
+    def test_verified_evidence_rejects_each_unknown_count(self):
+        capture = self.publish(PACKAGE, [1, 2])
+        result = self.verify(capture, source([1, 2]))
+        for column in (
+            "announced_total", "api_record_count", "api_distinct_count",
+            "api_duplicate_count", "local_distinct_count", "only_local_count", "only_api_count",
+        ):
+            with self.subTest(column=column), self.assertRaises(psycopg.errors.CheckViolation):
+                self.conn.execute(
+                    f"update tl_work.verification_attempt set {column} = null where attempt_id = %s",
+                    (result.attempt_id,),
+                )
+
+    def test_empty_evidence_requires_known_zero_counts(self):
+        capture = self.publish(PACKAGE, [])
+        result = self.verify(capture, source([], total=0))
+        for column in ("announced_total", "api_record_count", "api_distinct_count", "local_distinct_count"):
+            with self.subTest(column=column), self.assertRaises(psycopg.errors.CheckViolation):
+                self.conn.execute(
+                    f"update tl_work.verification_attempt set {column} = null where attempt_id = %s",
+                    (result.attempt_id,),
+                )
 
 
 class BudgetPlumbingTests(VerificationTestCase):

@@ -209,7 +209,7 @@ class FakeTransport:
         self.requests = []
         self.before_request = before_request
 
-    def post_json(self, url, payload, *, timeout, max_bytes):
+    def post_json(self, url, payload, *, timeout, max_bytes, check_deadline=None):
         self.requests.append(
             {"url": url, "payload": payload, "timeout": timeout, "max_bytes": max_bytes}
         )

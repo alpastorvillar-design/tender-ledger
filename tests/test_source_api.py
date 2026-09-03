@@ -7,6 +7,7 @@ against a local HTTP server.
 
 import json
 import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -159,6 +160,16 @@ class PaginationTests(unittest.TestCase):
         self.assertEqual(exc.observed.record_count, 4)
         self.assertEqual(len(exc.observed.keys), 2)
         self.assertIn("2 distinct", str(exc))
+
+    def test_duplicates_within_a_page_and_across_pages_are_counted(self):
+        exc, _ = fails([
+            api_page([1, "000001"], total=4, token="a"),
+            api_page([1, 2], total=4, token="b"),
+            api_page([], total=4),
+        ])
+        self.assertEqual(exc.observed.record_count, 4)
+        self.assertEqual(len(exc.observed.keys), 2)
+        self.assertEqual(exc.observed.duplicate_count, 2)
 
     def test_a_repeated_token_stops_the_walk(self):
         exc, _ = fails([
@@ -346,7 +357,26 @@ class RetryTests(unittest.TestCase):
         )
         self.assertIn("time budget is exhausted", str(exc))
         self.assertEqual(len(transport.requests), 2)
-        self.assertEqual(exc.observed.pages_fetched, 2)
+        self.assertEqual(exc.observed.pages_fetched, 1)  # the late response was rejected
+
+    def test_a_terminal_response_after_the_deadline_cannot_complete(self):
+        for terminal in ("no_token", "empty_page"):
+            with self.subTest(terminal=terminal):
+                clock = FakeClock()
+                script = [api_page([1], total=1, token=None)]
+                late_request = 1
+                if terminal == "empty_page":
+                    script = [api_page([1], total=1), api_page([], total=1)]
+                    late_request = 2
+
+                def spend(number, expected=late_request, current_clock=clock):
+                    if number == expected:
+                        current_clock.elapsed = 2.0
+
+                exc, _ = fails(script, budgets=Budgets(total_seconds=1.0),
+                               clock=clock, before_request=spend)
+                self.assertIn("time budget is exhausted", str(exc))
+                self.assertFalse(exc.observed.complete)
 
     def test_the_operation_timeout_never_exceeds_the_remaining_budget(self):
         clock = FakeClock()
@@ -470,6 +500,54 @@ class TransportTests(unittest.TestCase):
         self.server.reply = slow
         with self.assertRaises(TransientSourceError):
             self.post(timeout=0.2)
+
+    def test_valid_json_does_not_hide_a_truncated_http_message(self):
+        body = json.dumps(search_body([1], total=1, token=None)).encode()
+
+        def truncated(handler):
+            handler.rfile.read(int(handler.headers["Content-Length"]))
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(body) + 100))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(body)
+            handler.close_connection = True
+
+        original = _Handler.do_POST
+        _Handler.do_POST = truncated
+        self.addCleanup(setattr, _Handler, "do_POST", original)
+        with self.assertRaises(TransientSourceError) as caught:
+            self.post()
+        self.assertIn("incomplete HTTP body", str(caught.exception))
+
+    def test_a_trickling_body_is_stopped_by_the_verification_budget(self):
+        body = json.dumps(search_body([1], total=1, token=None)).encode() + b" " * 3000
+        stop = threading.Event()
+
+        def trickle(handler):
+            handler.rfile.read(int(handler.headers["Content-Length"]))
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            for offset in range(0, len(body), 32):
+                if stop.is_set():
+                    return
+                handler.wfile.write(body[offset:offset + 32])
+                handler.wfile.flush()
+                time.sleep(0.04)  # progress prevents a socket inactivity timeout
+
+        original = _Handler.do_POST
+        _Handler.do_POST = trickle
+        self.addCleanup(setattr, _Handler, "do_POST", original)
+        self.addCleanup(stop.set)
+        started = time.monotonic()
+        with self.assertRaises(SourceUnavailable) as caught:
+            enumerate_publication_keys(
+                self.transport, QUERY, url=self.url,
+                budgets=Budgets(total_seconds=0.25, operation_timeout=0.2),
+            )
+        self.assertIn("time budget is exhausted", str(caught.exception))
+        self.assertLess(time.monotonic() - started, 1.5)
 
     def test_a_refused_connection_is_a_transient_failure(self):
         self.server.shutdown()

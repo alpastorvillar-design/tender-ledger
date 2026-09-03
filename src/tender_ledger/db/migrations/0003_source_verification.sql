@@ -59,7 +59,7 @@ create table tl_work.verification_attempt (
     -- identifier set matched the capture exactly. No code path can record the
     -- claim without the numbers that justify it.
     constraint verification_attempt_verified_evidence check (
-        state <> 'verified' or (
+        state <> 'verified' or ((
             announced_total > 0
             and api_duplicate_count = 0
             and api_record_count = announced_total
@@ -68,17 +68,17 @@ create table tl_work.verification_attempt (
             and only_local_count = 0
             and only_api_count = 0
             and api_keys_sha256 is not null
-        )
+        ) is true)
     ),
     -- An empty result is only ever "unconfirmed": both sides have to be empty,
     -- and zero on its own still does not establish that the issue was published.
     constraint verification_attempt_empty_evidence check (
-        state <> 'empty_unconfirmed' or (
+        state <> 'empty_unconfirmed' or ((
             announced_total = 0
             and api_record_count = 0
             and api_distinct_count = 0
             and local_distinct_count = 0
-        )
+        ) is true)
     )
 );
 

@@ -19,10 +19,9 @@ implementation is ``urllib`` with a default TLS context, which validates the
 certificate chain and the hostname for https URLs.
 
 Interruption limit: ``urllib`` applies its timeout to individual socket
-operations, not to a whole request. The walk checks its budget before every
-request and before every sleep, but a request already in flight can still
-overrun it by up to one operation timeout. This is a bounded budget, not a hard
-deadline.
+operations, not to a whole request. The budget is checked between body reads
+and before accepting a result. A blocked socket operation can delay cancellation;
+DNS resolution and header parsing have no hard wall-clock deadline in urllib.
 """
 
 import email.utils
@@ -173,21 +172,44 @@ class Response:
 
 class Transport(Protocol):
     def post_json(
-        self, url: str, payload: dict, *, timeout: float, max_bytes: int
+        self, url: str, payload: dict, *, timeout: float, max_bytes: int,
+        check_deadline: Callable[[], None] | None = None,
     ) -> Response: ...
 
 
-def _read_capped(response, max_bytes: int) -> bytes:
-    """Read at most ``max_bytes``, refusing an oversized body before buffering it."""
+def _read_capped(response, max_bytes: int, check_deadline=None) -> bytes:
+    """Bound body size and check elapsed time between socket reads.
+
+    read1 avoids waiting for an entire buffer while a slow peer keeps sending
+    bytes. Explicit-size reads can return early on EOF without IncompleteRead,
+    so a declared message length must also be checked here.
+    """
     declared = response.headers.get("Content-Length")
-    if declared is not None and declared.strip().isdigit() and int(declared) > max_bytes:
+    if declared is not None:
+        if not re.fullmatch(r"[0-9]+", declared.strip()):
+            raise SourceUnavailable("the response has an invalid Content-Length")
+        declared = int(declared)
+    if declared is not None and declared > max_bytes:
         raise SourceUnavailable(
-            f"the response advertises {int(declared)} bytes, over the {max_bytes} byte budget"
+            f"the response advertises {declared} bytes, over the {max_bytes} byte budget"
         )
-    body = response.read(max_bytes + 1)
-    if len(body) > max_bytes:
-        raise SourceUnavailable(f"the response body exceeds the {max_bytes} byte budget")
-    return body
+    body = bytearray()
+    while True:
+        if check_deadline is not None:
+            check_deadline()
+        chunk = response.read1(min(64 * 1024, max_bytes + 1 - len(body)))
+        if check_deadline is not None:
+            check_deadline()
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise SourceUnavailable(f"the response body exceeds the {max_bytes} byte budget")
+    if declared is not None and len(body) != declared:
+        raise TransientSourceError(
+            f"incomplete HTTP body: received {len(body)} of {declared} declared bytes"
+        )
+    return bytes(body)
 
 
 class UrllibTransport:
@@ -198,7 +220,8 @@ class UrllibTransport:
         self._user_agent = user_agent
 
     def post_json(
-        self, url: str, payload: dict, *, timeout: float, max_bytes: int
+        self, url: str, payload: dict, *, timeout: float, max_bytes: int,
+        check_deadline: Callable[[], None] | None = None,
     ) -> Response:
         request = urllib.request.Request(
             url,
@@ -212,11 +235,11 @@ class UrllibTransport:
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=self.context) as reply:
-                return _response(reply, max_bytes)
+                return _response(reply, max_bytes, check_deadline)
         except urllib.error.HTTPError as exc:
             # An error status still carries headers worth honouring (Retry-After).
             with exc:
-                return _response(exc, max_bytes)
+                return _response(exc, max_bytes, check_deadline)
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, ssl.SSLError):
                 # A rejected certificate is not a hiccup to retry through.
@@ -228,11 +251,11 @@ class UrllibTransport:
             ) from exc
 
 
-def _response(reply, max_bytes: int) -> Response:
+def _response(reply, max_bytes: int, check_deadline=None) -> Response:
     return Response(
         status=reply.status,
         headers={key.lower(): value for key, value in reply.headers.items()},
-        body=_read_capped(reply, max_bytes),
+        body=_read_capped(reply, max_bytes, check_deadline),
     )
 
 
@@ -334,7 +357,9 @@ def _fetch_page(
                 payload,
                 timeout=min(budgets.operation_timeout, max(deadline.remaining(), 0.001)),
                 max_bytes=budgets.max_response_bytes,
+                check_deadline=deadline.check,
             )
+            deadline.check()
             if response.status in _RETRYABLE_STATUS:
                 raise TransientSourceError(
                     f"HTTP {response.status}",
@@ -433,9 +458,9 @@ def _walk(
                 " during pagination"
             )
 
-        new = [key for key in keys if key not in observed.keys]
-        observed.duplicate_count += len(keys) - len(new)
-        observed.keys.update(new)
+        previous_unique_count = len(observed.keys)
+        observed.keys.update(keys)
+        observed.duplicate_count += len(keys) - (len(observed.keys) - previous_unique_count)
         observed.record_count += len(keys)
         if observed.record_count > total:
             raise SourceUnavailable(
@@ -450,6 +475,7 @@ def _walk(
             # The terminal page. The observed API still hands back a token here,
             # so the count is the signal, not the token.
             if _received_everything(observed, total):
+                deadline.check()
                 return
             raise SourceUnavailable(
                 f"the source stopped after {observed.record_count} records"
@@ -457,6 +483,7 @@ def _walk(
             )
         if next_token is None:
             if _received_everything(observed, total):
+                deadline.check()
                 return
             raise SourceUnavailable(
                 f"pagination ended without a token after {observed.record_count} records"
