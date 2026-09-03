@@ -8,8 +8,16 @@ rows; verify the archive is unchanged; then publish the capture with a single
 transactional pointer swap. A crash at any point leaves the previous published
 capture visible and lets a retry resume from the last committed batch -- or, if
 the crash was between reconcile and publish, from the durable ``loaded`` state.
+
+Failures are classified rather than lumped together. A transient database error
+(a cancelled statement, a deadlock, a lost connection) leaves the capture in its
+recoverable state and is reported to the caller; a failure that condemns the
+artifact itself (duplicate identity, unreadable XML, a reconciliation mismatch)
+marks the capture ``failed``, which no retry resumes. Either way the load reports
+an error and the CLI exits non-zero.
 """
 
+import contextlib
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,12 +41,44 @@ _LOADER_LIMITS = Limits(
 )
 
 
+# A transient error leaves nothing about the capture wrong: the server dropped
+# or cancelled the work in flight, so the committed batches and the identity stay
+# valid and a retry resumes them. Anything saying the data itself is unacceptable
+# -- a duplicate identity, a constraint violation, unreadable XML -- is terminal.
+_TRANSIENT_SQLSTATE_CLASSES = ("08", "53", "57")  # connection, resources, intervention
+_TRANSIENT_SQLSTATES = frozenset({
+    "40001",  # serialization_failure
+    "40003",  # statement_completion_unknown
+    "40P01",  # deadlock_detected
+    "55006",  # object_in_use
+    "55P03",  # lock_not_available
+})
+
+
+def _is_transient(exc: psycopg.Error) -> bool:
+    if exc.sqlstate is None:
+        # No server diagnostic at all: the connection broke or was already gone.
+        return isinstance(exc, psycopg.OperationalError | psycopg.InterfaceError)
+    return (
+        exc.sqlstate[:2] in _TRANSIENT_SQLSTATE_CLASSES
+        or exc.sqlstate in _TRANSIENT_SQLSTATES
+    )
+
+
+def _release_lock_quietly(conn: psycopg.Connection, source_package_id: str) -> None:
+    """Release the capture lock while handling a failure. If the connection is
+    the thing that broke, the lock died with the session anyway and the error
+    being handled matters more than this bookkeeping."""
+    with contextlib.suppress(psycopg.Error):
+        repo.release_lock(conn, source_package_id)
+
+
 @dataclass(frozen=True)
 class LoadResult:
     capture_id: int
     source_package_id: str
     acquisition_ordinal: int
-    status: str  # 'published', 'loaded' (publish pending/failed), or 'failed'
+    status: str  # 'published', 'loaded'/'loading' (retriable), or 'failed'
     resumed: bool
     member_count: int
     distinct_notice_count: int
@@ -46,8 +86,9 @@ class LoadResult:
     reconciled: bool
     source_coverage_verified: bool
     batch_size: int | None
-    failure_reason: str | None = None
-    publish_error: str | None = None
+    failure_reason: str | None = None   # persisted: the capture is terminally failed
+    publish_error: str | None = None    # publish did not commit; the capture is retriable
+    load_error: str | None = None       # transient failure mid-load; the capture is retriable
 
 
 def digest_archive(path: Path) -> tuple[str, int]:
@@ -73,8 +114,7 @@ def load_package(
 ) -> LoadResult:
     if batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
-    if not conn.autocommit:
-        raise repo.CaptureError("load_package requires an autocommit connection")
+    repo.require_transaction_owner(conn)
 
     path = Path(path)
     limits = limits or _LOADER_LIMITS
@@ -95,7 +135,16 @@ def load_package(
     if capture.status == "loaded":
         return _publish(conn, capture.capture_id, source_package_id, before_publish, resumed=True)
 
-    effective_batch_size = capture.batch_size or batch_size
+    if capture.batch_size is None:
+        # Captures written before 0002 never recorded how the archive was split,
+        # so a resume cannot line its ordinals up with the committed batches.
+        # Refuse before writing rather than silently repartitioning.
+        _release_lock_quietly(conn, source_package_id)
+        raise repo.CaptureError(
+            f"capture {capture.capture_id} predates the recorded batch size and"
+            " cannot be resumed safely; re-acquire the package with force_recapture"
+        )
+    effective_batch_size = capture.batch_size
     done = repo.committed_batches(conn, capture.capture_id) if begin.resumed else set()
     if begin.resumed:
         repo.clear_uncommitted_rows(conn, capture.capture_id)
@@ -133,7 +182,21 @@ def load_package(
                 f" distinct={len(distinct_keys)} loaded={result.loaded_row_count}"
             )
     except (PackageError, psycopg.Error) as exc:
-        repo.fail_capture(conn, capture.capture_id, f"{type(exc).__name__}: {exc}")
+        detail = f"{type(exc).__name__}: {exc}"
+        if isinstance(exc, psycopg.Error) and _is_transient(exc):
+            _release_lock_quietly(conn, source_package_id)
+            try:
+                return _load_result(
+                    conn, capture.capture_id, begin.resumed, load_error=detail
+                )
+            except psycopg.Error:
+                raise exc from None  # the connection is gone; report what broke
+        try:
+            repo.fail_capture(conn, capture.capture_id, detail)
+        except (psycopg.Error, repo.CaptureError):
+            # Marking the failure needs the same connection. If that write cannot
+            # happen, the original error is what the operator has to see.
+            raise exc from None
         return _load_result(conn, capture.capture_id, begin.resumed)
 
     return _publish(conn, capture.capture_id, source_package_id, before_publish, begin.resumed)
@@ -145,10 +208,13 @@ def _publish(conn, capture_id, source_package_id, before_publish, resumed):
     try:
         repo.publish(conn, capture_id, before_commit=before_publish)
     except Exception as exc:  # any publish failure keeps the capture retriable
-        repo.release_lock(conn, source_package_id)
-        return _load_result(
-            conn, capture_id, resumed, publish_error=f"{type(exc).__name__}: {exc}"
-        )
+        _release_lock_quietly(conn, source_package_id)
+        try:
+            return _load_result(
+                conn, capture_id, resumed, publish_error=f"{type(exc).__name__}: {exc}"
+            )
+        except psycopg.Error:
+            raise exc from None  # the connection is gone; report what broke
     return _load_result(conn, capture_id, resumed)
 
 
@@ -158,6 +224,7 @@ def _load_result(
     resumed: bool,
     *,
     publish_error: str | None = None,
+    load_error: str | None = None,
 ) -> LoadResult:
     row = conn.execute(
         "select source_package_id, acquisition_ordinal, status, member_count,"
@@ -180,4 +247,5 @@ def _load_result(
         batch_size=batch_size,
         failure_reason=reason,
         publish_error=publish_error,
+        load_error=load_error,
     )

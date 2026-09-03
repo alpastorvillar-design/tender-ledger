@@ -1,7 +1,8 @@
 """Capture lifecycle against PostgreSQL: begin, load batches, reconcile, publish.
 
-Connection contract: these functions require an **autocommit** connection (the
-default from ``db.connect``). Each atomic unit is an explicit
+Connection contract: these functions own their transaction boundaries, so they
+need a connection that has none of its own -- **autocommit and idle**, which is
+what ``db.connect`` returns. Each atomic unit is an explicit
 ``with conn.transaction()`` block, so it is a real ``BEGIN``/``COMMIT`` visible to
 other connections the moment it returns; single reads run outside a transaction.
 Nothing here commits or rolls back a transaction the caller opened.
@@ -12,6 +13,8 @@ Invariants:
   of the same artifact reuses it -- including from a durable ``loaded`` state or
   after a failed publish. An intentional re-acquisition (``force_recapture``) is a
   new capture even when the bytes are identical, so A -> B -> A keeps three.
+* A retry resumes the *current* attempt for the package -- the most recently
+  acquired capture -- never an older one a later capture has already overtaken.
 * A batch commits its notice rows and its ``capture_batch`` record together.
 * Readers keep seeing the previously published capture until ``publish`` swaps the
   pointer in a single transaction.
@@ -24,6 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import psycopg
+from psycopg import pq
 
 from ..projection import CONTRACT_VERSION, ProjectedNotice
 
@@ -52,6 +56,10 @@ class CaptureNotReady(CaptureError):
     """publish() was called on a capture that has not reconciled."""
 
 
+class ConnectionStateError(CaptureError):
+    """The connection cannot own the transaction boundaries this module needs."""
+
+
 @dataclass(frozen=True)
 class Capture:
     capture_id: int
@@ -78,11 +86,26 @@ class ReconcileResult:
     distinct_notice_count: int
 
 
-def _require_autocommit(conn: psycopg.Connection) -> None:
+def require_transaction_owner(conn: psycopg.Connection) -> None:
+    """Refuse a connection whose transaction boundaries are not ours to own.
+
+    Autocommit alone is not enough: inside ``with conn.transaction()`` the flag
+    stays True while every block below it degrades to a savepoint. Work would
+    then be reported as published while another session still sees nothing, the
+    advisory lock would be released before the real commit, and the caller's
+    rollback would erase all of it. Reject before writing or locking anything,
+    and never commit or roll back a transaction the caller opened.
+    """
     if not conn.autocommit:
-        raise CaptureError(
+        raise ConnectionStateError(
             "the capture repository requires an autocommit connection"
             " (db.connect() returns one by default)"
+        )
+    status = conn.info.transaction_status
+    if status != pq.TransactionStatus.IDLE:
+        raise ConnectionStateError(
+            f"the connection is already inside a transaction ({status.name});"
+            " the caller must commit or roll it back first"
         )
 
 
@@ -138,19 +161,40 @@ def begin_capture(
 ) -> BeginResult:
     """Persist (or resume) a capture identity for one source package.
 
-    Without ``force_recapture``: an in-progress or durably ``loaded`` capture of
-    the same artifact and contract is resumed; the currently published capture of
-    the same artifact is returned as a no-op. A superseded or failed capture with
-    the same bytes is never reused -- re-acquiring it is a new capture.
-    ``force_recapture`` always creates a new capture.
+    Without ``force_recapture``: when the most recently acquired capture of this
+    package is still open (``acquiring``/``loading``/``loaded``) for the same
+    artifact and contract it is resumed; otherwise a published capture of the
+    same artifact is returned as a no-op. An older open attempt that a later
+    capture has overtaken is left alone, and a superseded or failed capture is
+    never reused -- re-acquiring it is a new capture. ``force_recapture`` always
+    creates a new capture.
     """
-    _require_autocommit(conn)
+    require_transaction_owner(conn)
     if batch_size < 1:
         raise CaptureError("batch_size must be a positive integer")
     if not _acquire_lock(conn, source_package_id, lock_wait):
         raise ConcurrentCaptureError(source_package_id)
 
     if not force_recapture:
+        # The current attempt decides. Resuming it before looking for a replay is
+        # what lets an intentional recapture of identical bytes finish after an
+        # interrupted publish instead of replaying the capture it supersedes;
+        # ordering by acquisition also keeps an attempt that a later capture has
+        # already overtaken from being resurrected.
+        latest = conn.execute(
+            f"select {_CAPTURE_COLUMNS} from tl_work.capture"
+            " where source_package_id = %s order by acquisition_ordinal desc limit 1",
+            (source_package_id,),
+        ).fetchone()
+        if latest is not None:
+            attempt = Capture(*latest)
+            if (
+                attempt.status in _RESUMABLE_STATUSES
+                and attempt.artifact_sha256 == artifact_sha256
+                and attempt.contract_version == contract_version
+            ):
+                return BeginResult(capture=attempt, resumed=True)
+
         current = conn.execute(
             "select c.capture_id from tl_work.capture c"
             " join tl_work.published_capture p on p.capture_id = c.capture_id"
@@ -162,16 +206,6 @@ def begin_capture(
             return BeginResult(
                 capture=_load_capture(conn, current[0]), resumed=True, already_complete=True
             )
-
-        resumable = conn.execute(
-            "select capture_id from tl_work.capture"
-            " where source_package_id = %s and artifact_sha256 = %s"
-            "   and contract_version = %s and status = any(%s)"
-            " order by capture_id desc limit 1",
-            (source_package_id, artifact_sha256, contract_version, list(_RESUMABLE_STATUSES)),
-        ).fetchone()
-        if resumable is not None:
-            return BeginResult(capture=_load_capture(conn, resumable[0]), resumed=True)
 
     capture_id = conn.execute(
         "insert into tl_work.capture"
@@ -195,6 +229,7 @@ def committed_batches(conn: psycopg.Connection, capture_id: int) -> set[int]:
 def clear_uncommitted_rows(conn: psycopg.Connection, capture_id: int) -> int:
     """Drop notice rows whose batch never committed. With real per-batch
     transactions this should find nothing; it guards the resume invariant."""
+    require_transaction_owner(conn)
     with conn.transaction():
         deleted = conn.execute(
             "delete from tl_work.notice_capture n where n.capture_id = %s"
@@ -238,7 +273,7 @@ def load_batch(
     """Load one deterministic batch: COPY the rows and record the batch in one
     transaction. A duplicate canonical identity violates the notice primary key,
     the transaction rolls back, and the caller fails the capture."""
-    _require_autocommit(conn)
+    require_transaction_owner(conn)
     columns = ", ".join(_NOTICE_COLUMNS)
     lo = notices[0].source_filename if notices else ""
     hi = notices[-1].source_filename if notices else ""
@@ -265,7 +300,7 @@ def reconcile(
     member_count: int,
     distinct_notice_count: int,
 ) -> ReconcileResult:
-    _require_autocommit(conn)
+    require_transaction_owner(conn)
     with conn.transaction():
         loaded = conn.execute(
             "select count(*) from tl_work.notice_capture where capture_id = %s",
@@ -297,7 +332,7 @@ def publish(
     and leaves visibility and completion status untouched. The advisory lock is
     released only after the transaction commits.
     """
-    _require_autocommit(conn)
+    require_transaction_owner(conn)
     with conn.transaction():
         row = conn.execute(
             "select source_package_id, status, member_count, distinct_notice_count,"
@@ -339,7 +374,7 @@ def publish(
 
 
 def fail_capture(conn: psycopg.Connection, capture_id: int, reason: str) -> None:
-    _require_autocommit(conn)
+    require_transaction_owner(conn)
     with conn.transaction():
         row = conn.execute(
             "select source_package_id, status from tl_work.capture"

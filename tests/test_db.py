@@ -25,7 +25,7 @@ from ted_fixtures import (
 from tender_ledger import db
 from tender_ledger.config import load_config
 from tender_ledger.db import repository as repo
-from tender_ledger.loader import digest_archive, load_package
+from tender_ledger.loader import _is_transient, digest_archive, load_package
 from tender_ledger.packages import stream_notices
 from tender_ledger.projection import project_member
 
@@ -74,6 +74,33 @@ class LoaderTestCase(unittest.TestCase):
         return conn.execute(
             "select status from tl_work.capture where capture_id = %s", (capture_id,)
         ).fetchone()[0]
+
+    def persisted(self, capture_id, conn=None):
+        """(status, committed batches, notice rows) as another connection sees it."""
+        conn = conn or self.conn
+        return conn.execute(
+            "select status,"
+            " (select count(*) from tl_work.capture_batch where capture_id = %s),"
+            " (select count(*) from tl_work.notice_capture where capture_id = %s)"
+            " from tl_work.capture where capture_id = %s",
+            (capture_id,) * 3,
+        ).fetchone()
+
+    def captures(self, package, conn=None):
+        conn = conn or self.conn
+        return conn.execute(
+            "select count(*) from tl_work.capture where source_package_id = %s", (package,)
+        ).fetchone()[0]
+
+    def lock_is_free(self, package, conn=None):
+        """Take and release the capture lock from outside, spelling out the key."""
+        conn = conn or self.conn
+        got = conn.execute(
+            "select pg_try_advisory_lock(hashtext(%s)::int8)", (package,)
+        ).fetchone()[0]
+        if got:
+            conn.execute("select pg_advisory_unlock(hashtext(%s)::int8)", (package,))
+        return got
 
 
 class HappyPathTests(LoaderTestCase):
@@ -178,6 +205,7 @@ class FailureTests(LoaderTestCase):
         result = load_package(self.conn, pkg, "daily/dup", batch_size=10)
         self.assertEqual(result.status, "failed")
         self.assertIn("UniqueViolation", result.failure_reason or "")
+        self.assertIsNone(result.load_error)
         self.assertEqual(self.notices(), [])
         self.assertEqual(
             self.conn.execute("select count(*) from tl_work.capture_batch").fetchone()[0], 0
@@ -457,6 +485,42 @@ class BatchSizeContractTests(LoaderTestCase):
         self.assertEqual(retry.status, "published")
         self.assertEqual(retry.loaded_row_count, 5)
 
+    def test_a_capture_from_before_the_recorded_batch_size_is_not_resumed(self):
+        pkg = self.package("b4", [legacy_member(100 + i) for i in range(5)])
+        sha, size = _digest(pkg)
+        writer = self.new_conn()
+        begin = repo.begin_capture(writer, "daily/pre0002", sha, size, batch_size=2)
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg)[:2])
+        writer.close()
+        # as a capture written before migration 0002: no recorded partition
+        self.conn.execute(
+            "update tl_work.capture set batch_size = null where capture_id = %s",
+            (begin.capture.capture_id,),
+        )
+
+        with self.assertRaises(repo.CaptureError):
+            load_package(self.new_conn(), pkg, "daily/pre0002", batch_size=2)
+
+        self.assertEqual(self.persisted(begin.capture.capture_id), ("loading", 1, 2))
+        self.assertTrue(self.lock_is_free("daily/pre0002"))
+
+    def test_a_loaded_capture_without_a_recorded_batch_size_still_publishes(self):
+        pkg = self.package("b5", [legacy_member(1), legacy_member(2)])
+        sha, size = _digest(pkg)
+        writer = self.new_conn()
+        begin = repo.begin_capture(writer, "daily/pre0002-loaded", sha, size, batch_size=2)
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg))
+        repo.reconcile(writer, begin.capture.capture_id, 2, 2)
+        writer.close()
+        self.conn.execute(
+            "update tl_work.capture set batch_size = null where capture_id = %s",
+            (begin.capture.capture_id,),
+        )
+
+        retry = load_package(self.new_conn(), pkg, "daily/pre0002-loaded", batch_size=2)
+        self.assertEqual(retry.capture_id, begin.capture.capture_id)
+        self.assertEqual(retry.status, "published")
+
     def test_non_positive_batch_size_is_rejected(self):
         pkg = self.package("b3", [legacy_member(1)])
         with self.assertRaises(ValueError):
@@ -580,6 +644,240 @@ class MigrationUpgradeTests(unittest.TestCase):
                     " where table_schema = 'tl_work' and table_name = 'capture'"
                 )
             },
+        )
+
+
+class ConnectionContractTests(LoaderTestCase):
+    """The loader owns its transactions, so it refuses a connection that has one.
+
+    An autocommit connection inside ``with conn.transaction()`` keeps
+    ``autocommit`` True while every block below becomes a savepoint: the loader
+    would report a publish that no other session can see and that the caller's
+    rollback would erase.
+    """
+
+    def _own_work(self, conn):
+        conn.execute(
+            "insert into tl_work.capture (source_package_id, artifact_sha256,"
+            " artifact_bytes, contract_version, status)"
+            " values ('caller/own-work', 'aa', 1, 'caller', 'failed')"
+        )
+
+    def test_load_inside_a_caller_transaction_is_refused_and_keeps_that_work(self):
+        pkg = self.package("t", [legacy_member(1), legacy_member(2)])
+        writer = self.new_conn()
+        observer = self.new_conn()
+
+        with writer.transaction():
+            self._own_work(writer)
+            with self.assertRaises(repo.ConnectionStateError):
+                load_package(writer, pkg, "daily/outer")
+            # refused before writing or locking: nothing exists outside, and the
+            # advisory lock is still available to another session
+            self.assertEqual(observer.execute(
+                "select count(*) from tl_work.capture where source_package_id = %s",
+                ("daily/outer",),
+            ).fetchone()[0], 0)
+            self.assertTrue(self.lock_is_free("daily/outer", observer))
+
+        # the caller's own transaction was neither committed nor rolled back for it
+        self.assertEqual(self.captures("caller/own-work", observer), 1)
+        self.assertEqual(self.captures("daily/outer", observer), 0)
+
+    def test_repository_mutators_refuse_a_caller_transaction(self):
+        pkg = self.package("t", [legacy_member(1), legacy_member(2)])
+        sha, size = _digest(pkg)
+        setup = self.new_conn()
+        capture_id = repo.begin_capture(
+            setup, "daily/mutators", sha, size, batch_size=2
+        ).capture.capture_id
+        rows = projected_rows(pkg)
+
+        writer = self.new_conn()
+        with writer.transaction():
+            self._own_work(writer)
+            calls = {
+                "begin_capture": lambda: repo.begin_capture(
+                    writer, "daily/other", sha, size, batch_size=2
+                ),
+                "load_batch": lambda: repo.load_batch(writer, capture_id, 0, rows),
+                "clear_uncommitted_rows": lambda: repo.clear_uncommitted_rows(
+                    writer, capture_id
+                ),
+                "reconcile": lambda: repo.reconcile(writer, capture_id, 2, 2),
+                "publish": lambda: repo.publish(writer, capture_id),
+                "fail_capture": lambda: repo.fail_capture(writer, capture_id, "x"),
+                "migrate": lambda: db.migrate(writer),
+            }
+            for name, call in calls.items():
+                with self.subTest(operation=name), self.assertRaises(
+                    repo.ConnectionStateError
+                ):
+                    call()
+
+        # every refusal happened before touching the database, so the caller's
+        # transaction stayed usable and committed
+        self.assertEqual(self.captures("caller/own-work"), 1)
+        self.assertEqual(self.captures("daily/other"), 0)
+        self.assertEqual(self.persisted(capture_id), ("acquiring", 0, 0))
+
+    def test_a_connection_without_autocommit_is_refused(self):
+        pkg = self.package("t", [legacy_member(1)])
+        manual = self.new_conn(autocommit=False)
+        with self.assertRaises(repo.ConnectionStateError):
+            load_package(manual, pkg, "daily/manual")
+        self.assertEqual(self.captures("daily/manual"), 0)
+
+
+class TransientFailureTests(LoaderTestCase):
+    """A database error that cancels work in flight is not the same as one that
+    condemns the artifact."""
+
+    def _cancel_before(self, ordinal):
+        """Make PostgreSQL cancel a real statement just before that batch."""
+        original = repo.load_batch
+
+        def load_batch(conn, capture_id, batch_ordinal, notices):
+            if batch_ordinal == ordinal:
+                conn.execute("set statement_timeout = '10ms'")
+                try:
+                    conn.execute("select pg_sleep(0.5)")
+                finally:
+                    conn.execute("set statement_timeout = 0")
+            return original(conn, capture_id, batch_ordinal, notices)
+
+        return mock.patch.object(repo, "load_batch", side_effect=load_batch)
+
+    def test_a_cancelled_statement_keeps_the_capture_and_its_committed_batch(self):
+        pkg = self.package("t", [legacy_member(100 + i) for i in range(5)])
+        with self._cancel_before(1):
+            interrupted = load_package(self.new_conn(), pkg, "daily/cancel", batch_size=2)
+
+        self.assertEqual(interrupted.status, "loading")
+        self.assertIn("QueryCanceled", interrupted.load_error or "")
+        self.assertIsNone(interrupted.failure_reason)
+        self.assertEqual(self.persisted(interrupted.capture_id), ("loading", 1, 2))
+
+        written = []
+        original = repo.load_batch
+
+        def spy(conn, capture_id, ordinal, notices):
+            written.append(ordinal)
+            return original(conn, capture_id, ordinal, notices)
+
+        with mock.patch.object(repo, "load_batch", side_effect=spy):
+            retry = load_package(self.new_conn(), pkg, "daily/cancel", batch_size=2)
+
+        self.assertEqual(retry.capture_id, interrupted.capture_id)
+        self.assertEqual(retry.acquisition_ordinal, interrupted.acquisition_ordinal)
+        self.assertTrue(retry.resumed)
+        self.assertEqual(retry.status, "published")
+        self.assertEqual(written, [1, 2])  # batch 0 was not rewritten
+        self.assertEqual(self.captures("daily/cancel"), 1)
+
+        clean = load_package(self.new_conn(), pkg, "daily/clean", batch_size=2)
+        self.assertEqual(
+            _notice_rows(self.conn, retry.capture_id),
+            _notice_rows(self.conn, clean.capture_id),
+        )
+
+    def test_a_duplicate_identity_stays_terminal_and_is_never_resumed(self):
+        pkg = self.package("dup", [legacy_member(7), eforms_member(7)])
+        first = load_package(self.new_conn(), pkg, "daily/terminal", batch_size=10)
+        self.assertEqual(first.status, "failed")
+        self.assertIsNone(first.load_error)
+
+        retry = load_package(self.new_conn(), pkg, "daily/terminal", batch_size=10)
+        self.assertEqual(retry.status, "failed")
+        self.assertNotEqual(retry.capture_id, first.capture_id)
+        self.assertFalse(retry.resumed)
+
+    def test_classification_of_the_errors_that_decide_recoverability(self):
+        from psycopg import errors
+
+        transient = (
+            errors.QueryCanceled("cancelled"),          # statement_timeout
+            errors.DeadlockDetected("deadlock"),
+            errors.SerializationFailure("conflict"),
+            errors.AdminShutdown("server restarting"),
+            errors.ConnectionFailure("gone"),
+            psycopg.OperationalError("connection closed"),  # no sqlstate at all
+        )
+        terminal = (
+            errors.UniqueViolation("duplicate key"),
+            errors.CheckViolation("violates check"),
+            errors.NotNullViolation("null value"),
+            errors.UndefinedTable("no such relation"),
+        )
+        for exc in transient:
+            with self.subTest(error=type(exc).__name__):
+                self.assertTrue(_is_transient(exc))
+        for exc in terminal:
+            with self.subTest(error=type(exc).__name__):
+                self.assertFalse(_is_transient(exc))
+
+
+class InterruptedRecaptureTests(LoaderTestCase):
+    """A retry resumes the current attempt, not the capture it was replacing."""
+
+    def test_recapture_of_identical_bytes_resumes_after_a_failed_publish(self):
+        pkg = self.package("a", [legacy_member(1), legacy_member(2)])
+        first = load_package(self.new_conn(), pkg, "daily/again")
+
+        forced = load_package(
+            self.new_conn(), pkg, "daily/again", force_recapture=True,
+            before_publish=lambda c: c.execute("select 1 / 0"),
+        )
+        self.assertEqual(forced.status, "loaded")
+        self.assertNotEqual(forced.capture_id, first.capture_id)
+
+        retry = load_package(self.new_conn(), pkg, "daily/again")
+        self.assertEqual(retry.capture_id, forced.capture_id)
+        self.assertEqual(retry.status, "published")
+        self.assertTrue(retry.resumed)
+        self.assertEqual(self.capture_status(first.capture_id), "superseded")
+        self.assertEqual(self.captures("daily/again"), 2)
+        self.assertEqual(self.notices(package="daily/again"), ["1-2023", "2-2023"])
+
+    def test_recapture_of_identical_bytes_resumes_from_its_committed_batches(self):
+        pkg = self.package("a", [legacy_member(100 + i) for i in range(5)])
+        first = load_package(self.new_conn(), pkg, "daily/partial", batch_size=2)
+
+        sha, size = _digest(pkg)
+        writer = self.new_conn()
+        begin = repo.begin_capture(
+            writer, "daily/partial", sha, size, batch_size=2, force_recapture=True
+        )
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg)[:2])
+        writer.close()  # crash during the intentional recapture
+
+        retry = load_package(self.new_conn(), pkg, "daily/partial", batch_size=2)
+        self.assertEqual(retry.capture_id, begin.capture.capture_id)
+        self.assertEqual(retry.status, "published")
+        self.assertEqual(self.capture_status(first.capture_id), "superseded")
+        self.assertEqual(self.captures("daily/partial"), 2)
+
+    def test_an_attempt_a_later_capture_overtook_is_not_resurrected(self):
+        pkg_a = self.package("a", [legacy_member(100 + i) for i in range(4)])
+        pkg_b = self.package("b", [legacy_member(200 + i) for i in range(4)])
+        sha_a, size_a = _digest(pkg_a)
+
+        abandoned = self.new_conn()
+        begin = repo.begin_capture(abandoned, "daily/overtaken", sha_a, size_a, batch_size=2)
+        repo.load_batch(abandoned, begin.capture.capture_id, 0, projected_rows(pkg_a)[:2])
+        abandoned.close()
+
+        later = load_package(self.new_conn(), pkg_b, "daily/overtaken", batch_size=2)
+        self.assertEqual(later.status, "published")
+
+        again = load_package(self.new_conn(), pkg_a, "daily/overtaken", batch_size=2)
+        self.assertEqual(again.status, "published")
+        self.assertNotEqual(again.capture_id, begin.capture.capture_id)
+        self.assertGreater(again.acquisition_ordinal, later.acquisition_ordinal)
+        # the overtaken attempt is left exactly as it was, and stays invisible
+        self.assertEqual(self.persisted(begin.capture.capture_id), ("loading", 1, 2))
+        self.assertEqual(
+            self.notices(package="daily/overtaken"), [f"{100 + i}-2023" for i in range(4)]
         )
 
 

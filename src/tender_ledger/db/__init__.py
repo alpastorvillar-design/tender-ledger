@@ -7,6 +7,7 @@ from pathlib import Path
 import psycopg
 
 from ..config import DbConfig, load_config
+from .repository import require_transaction_owner
 
 _MIGRATION_NAME = re.compile(r"^\d{4}_[a-z0-9_]+\.sql$")
 
@@ -15,7 +16,9 @@ def connect(config: DbConfig | None = None, *, dbname: str | None = None,
             autocommit: bool = True) -> psycopg.Connection:
     """Open a connection. Autocommit by default: the loader and repository own
     their transaction boundaries with explicit ``with conn.transaction()`` blocks
-    and never leave an implicit transaction open on the caller's connection."""
+    and never leave an implicit transaction open on the caller's connection. They
+    also refuse a connection that is already inside a transaction, so a caller
+    keeping its own unit of work has to pass a separate connection."""
     config = config or load_config(dbname=dbname)
     return psycopg.connect(**config.conninfo(), autocommit=autocommit)
 
@@ -40,8 +43,10 @@ def migrate(conn: psycopg.Connection, *, up_to: str | None = None) -> list[str]:
 
     ``up_to`` stops after that version (inclusive); used by tests that exercise
     the upgrade path from an earlier schema. Returns the versions applied by this
-    call; empty when already current.
+    call; empty when already current. Like the repository, this owns its
+    transactions and refuses a connection that already has one open.
     """
+    require_transaction_owner(conn)
     applied: list[str] = []
     known = _recorded_versions(conn)
     for version, sql in _migrations():

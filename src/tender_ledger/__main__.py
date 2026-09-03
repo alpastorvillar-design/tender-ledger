@@ -37,6 +37,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--lock-wait", action="store_true",
         help="wait for a concurrent capture instead of failing fast",
     )
+    load.add_argument(
+        "--force-recapture", action="store_true",
+        help="acquire the package again as a new capture, even for identical bytes",
+    )
 
     status = commands.add_parser("status", help="show capture status")
     status.add_argument("--package-id", help="restrict to one source package")
@@ -77,9 +81,17 @@ def _cmd_load(args: argparse.Namespace) -> int:
         result = load_package(
             conn, args.archive, args.package_id,
             batch_size=args.batch_size, lock_wait=args.lock_wait,
+            force_recapture=args.force_recapture,
         )
     print(json.dumps(dataclasses.asdict(result), indent=2))
-    return 0 if result.status == "published" else 1
+    if result.status != "published":
+        reason = result.failure_reason or result.load_error or result.publish_error
+        print(
+            f"capture {result.capture_id} is {result.status!r}, not published: {reason}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def _cmd_status(args: argparse.Namespace) -> int:

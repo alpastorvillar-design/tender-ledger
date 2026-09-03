@@ -31,12 +31,34 @@ publish --------------> one transaction: supersede prior capture, swap
 
 ## Connection contract
 
-The loader and the repository require an **autocommit** connection, which
-`db.connect()` returns by default. Each atomic unit - a batch, the reconcile, the
-publish - is an explicit `with conn.transaction()` block, so it is a real
-`COMMIT` visible to other connections the moment it returns. A committed batch
-survives the writer disconnecting; nothing here commits or rolls back a
-transaction the caller opened.
+The loader and the repository own their transaction boundaries, so they require
+a connection that has none of its own: **autocommit and idle**, which is what
+`db.connect()` returns. Each atomic unit - a batch, the reconcile, the publish -
+is an explicit `with conn.transaction()` block, so it is a real `COMMIT` visible
+to other connections the moment it returns. A committed batch survives the writer
+disconnecting; nothing here commits or rolls back a transaction the caller opened.
+
+Autocommit alone is not sufficient, so it is not what is checked. Inside
+`with conn.transaction()` the flag stays true while every block below it becomes
+a savepoint: the load would report a published capture that no other session can
+see, release the advisory lock before the real commit, and lose everything on the
+caller's rollback. A connection already in a transaction is refused - before any
+write and before the lock - with `ConnectionStateError`; the caller's own unit of
+work is left untouched and needs a separate connection. `db.migrate` refuses the
+same way.
+
+## Failure classification
+
+A database error that cancels or loses work in flight (`57xxx` including
+`statement_timeout`, deadlock and serialization failures, `08xxx` connection loss,
+`53xxx` resource exhaustion) says nothing about the artifact: committed batches
+and the capture identity stay valid, so the capture keeps its recoverable state
+and the result carries `load_error`. An error that condemns the artifact - a
+duplicate canonical identity, a constraint violation, unreadable XML, a
+reconciliation mismatch - marks the capture `failed`, which no retry resumes.
+Either way `load` reports the error and exits non-zero. If the connection itself
+is gone, the original error is raised rather than replaced by the failure of the
+bookkeeping write that could not happen on it.
 
 ## Schema
 
@@ -62,9 +84,14 @@ the archive the same way even if `--batch-size` changes.
 | --- | --- |
 | Replay of the same published artifact | No-op; the existing capture is returned, no new identity |
 | Crash mid-load, same artifact | `begin_capture` resumes the `loading` capture; committed batches are skipped and not rewritten; the final state matches a clean run |
+| Transient database error mid-load (cancelled statement, deadlock, lost connection) | The capture keeps its committed batches and identity; the result carries `load_error` and a non-zero exit; a retry resumes it |
+| Terminal database error mid-load (duplicate identity, constraint violation) | The capture is marked `failed` and is never resumed; a re-run acquires a new capture |
 | Crash between reconcile and publish | The `loaded` capture is durable; a retry resumes it and only publishes |
 | Publish fails (DB error or a rejecting `before_publish` hook) | Capture stays `loaded` and retriable; the result carries `publish_error`; the previous capture stays visible |
-| Intentional re-acquisition (`force_recapture`, A -> B -> A) | Each is a new capture with its own `acquisition_ordinal`; identical bytes still get a new identity; all are kept |
+| Intentional re-acquisition (`--force-recapture`, A -> B -> A) | Each is a new capture with its own `acquisition_ordinal`; identical bytes still get a new identity; all are kept |
+| Interrupted re-acquisition of identical bytes | The retry resumes that capture, not the older published one it supersedes: recovery selects the most recently acquired capture first |
+| Open attempt that a later capture has completed past | Left alone; a re-run acquires a new capture rather than publishing work acquired before the current one |
+| Resuming a capture written before migration `0002` | Refused before writing: its batch partition was never recorded, so the ordinals cannot be lined up. Publishing an already `loaded` one still works |
 | Duplicate canonical identity in a package | The batch violates the notice primary key, rolls back with nothing left, and the capture fails |
 | Corrupt / truncated / mid-run-modified archive | `PackageError`; the capture fails and is never published |
 | Reader during an incomplete replacement | Still sees the previous complete capture until `publish` commits |
@@ -83,8 +110,15 @@ is `false` on the views, on `status`, and on the `LoadResult` returned by `load`
 ```sh
 python -m tender_ledger db upgrade
 python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220
+python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220 --force-recapture
 python -m tender_ledger status --package-id daily/202300220
 ```
+
+`load` re-runs are safe: an unfinished capture of the same archive is resumed and
+an already published one is a no-op. `--force-recapture` is the explicit way to
+acquire the same package again as a new capture; if that recapture is interrupted,
+a plain `load` resumes it. Anything other than `published` exits 1 and prints the
+reason on stderr.
 
 Connection settings come from `TL_DB_*` / `POSTGRES_*` environment variables or
 the local `.env`; see `config.py`.
