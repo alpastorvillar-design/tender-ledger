@@ -1,5 +1,7 @@
 # Tender Ledger
 
+[![CI](https://github.com/alpastorvillar-design/tender-ledger/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alpastorvillar-design/tender-ledger/actions/workflows/ci.yml)
+
 A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 
 **Status:** the archive inspector and a transactional package loader into
@@ -14,26 +16,69 @@ Procurement analysts need a queryable record of public notices, changes, and dat
 
 The historical target is TED notices across countries for 2020–2025, with Spain as one analytical case. Completion requires at least one million distinct real notices, reconciled coverage, measured SQL performance, and recovery evidence.
 
-## Planned system
+## What it delivers
 
-```text
-TED daily/monthly XML packages
-             |
-     raw archives + manifests
-             |
-   validation + normalization
-             |
-      PostgreSQL batch loading
-             |
- complete captures + SQL analysis
-             |
-    coverage and recovery reports
+Load a TED archive into a queryable database, repeat the load safely, and recover
+from an interruption without rewriting committed batches. Analysts can count
+distinct notices by publication month, buyer country, and procurement category
+without double counting overlapping source packages.
 
-TED Search API -> count/identity checks
-Airflow        -> schedule the verified workflow
+| Implemented | Evidence |
+| --- | --- |
+| Legacy XML and eForms inspection and projection | 2,967 real notices from one mixed daily package |
+| Durable batch loading and atomic publication | Recovery, reader visibility, concurrency, and corruption tests |
+| SQL over published, deduplicated notices | Monthly counts reconcile to all 2,967 loaded notices |
+| Explicit coverage state | Source coverage remains unverified until the API verifier is implemented |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Local TED XML archive] --> B[Validate and project]
+    B --> C[PostgreSQL COPY batches]
+    C --> D[Reconcile capture]
+    D --> E[Atomic publication]
+    E --> F[SQL consumption views]
 ```
 
-Python implements the ingestion workflow, PostgreSQL stores relational data and transactional state, Docker provides the runtime, and Airflow will coordinate backfills. The first load uses XML packages; the API checks coverage. Cloud is an optional later extension.
+Python implements archive handling and ingestion. PostgreSQL stores notice data
+and transactional state; Docker Compose provides the local database. A restricted
+reader role sees published notice rows while incomplete replacements remain
+internal. The planned HTTP downloader and TED Search API verifier will establish
+source coverage; Airflow will later coordinate the verified workflow.
+
+See [source and design decisions](docs/design.md),
+[transaction boundaries and recovery](docs/loading.md), and
+[field projection](docs/projection.md).
+
+## Quick start
+
+Requires Python 3.13+ and Docker with Linux containers; the validated Python
+version is 3.14.3. From a terminal:
+
+```sh
+git clone https://github.com/alpastorvillar-design/tender-ledger.git
+cd tender-ledger
+python -m venv .venv
+```
+
+Activate the environment with `.venv\Scripts\Activate.ps1` in PowerShell or
+`source .venv/bin/activate` in Bash, then run:
+
+```sh
+python -m pip install -e ".[dev]" -c constraints.txt
+python scripts/create_local_env.py
+docker compose up -d --wait postgres
+python -m tender_ledger db upgrade
+python scripts/run_tests.py
+```
+
+This runs synthetic correctness fixtures against PostgreSQL; it does not download
+the historical dataset. To inspect and load real data, download a package from
+[TED](https://ted.europa.eu/packages/daily/202300220) into the ignored `data/`
+directory and follow the commands below. That mixed daily package was about
+12 MiB compressed when checked. Keep its source package ID with the file.
+See [local development](docs/local-development.md) for configuration and persistence.
 
 ## Run the inspector
 
@@ -64,11 +109,9 @@ A successful inspection does not establish source completeness: the output alway
 
 ## Load a package into PostgreSQL
 
-Requires the local database (see below) and `psycopg`:
+After the quick start, load a local archive using its TED package identity:
 
 ```sh
-python -m pip install -e . -c constraints.txt
-python -m tender_ledger db upgrade
 python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220
 python -m tender_ledger status --package-id daily/202300220
 ```
@@ -81,6 +124,25 @@ re-acquisitions are new captures, and readers keep the previous complete capture
 until a replacement publishes. Full semantics and guarantees:
 [transactional loading](docs/loading.md). Example analytical and diagnostic SQL
 is under [`queries/`](queries/).
+
+## Query the result
+
+The consumption grain is one canonical publication per row, even when daily and
+monthly packages overlap. Count it directly:
+
+```sql
+select count(*) as distinct_notices
+from tl_read.distinct_notice;
+```
+
+[Monthly counts](queries/monthly_notice_counts.sql) groups those notices by
+publication month, buyer country, and primary CPV division. The verified daily
+load produced **611 groups whose counts sum to 2,967**. Missing classifications
+remain explicit. These counts describe published notices, not awarded contracts
+or procurement spending.
+
+[Diagnostics](queries/diagnostics.sql) exposes capture status, missing fields,
+schema versions, and source overlap.
 
 ## Verified evidence
 
@@ -121,6 +183,24 @@ python scripts/run_tests.py
 The test runner creates and replaces its dedicated test databases; use a local
 development server or disposable CI service. It does not target the development
 database. Local checks are verified; the GitHub-hosted run remains pending.
+
+## Roadmap and limits
+
+1. Download integrity and API coverage verification, with bounded retries and
+   explicit handling of empty or unavailable source periods.
+2. A measured rehearsal with at least 100,000 real notices, followed by at least
+   one million distinct notices toward the 2020–2025 historical target.
+3. Six SQL workloads with correctness checks, query plans, storage measurements,
+   and recovery results; then local Airflow orchestration.
+
+The current real-data validation covers one mixed day. Historical completeness,
+large-dataset performance, and cloud execution have not been demonstrated.
+Source artifacts and database volumes stay outside Git. Synthetic fixtures test
+correctness and failures; they do not count toward the real-data scale target.
+The implemented projection excludes contact details and monetary amounts.
+
+[Scale and SQL requirements](docs/scale-and-sql.md) defines the remaining gates.
+Local execution requires no cloud account or paid API.
 
 ## Sources
 

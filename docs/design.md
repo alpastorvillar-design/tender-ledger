@@ -36,7 +36,7 @@ Select parsers by root and namespace, never by filename width or publication yea
 
 Publication date is a calendar date. Values such as `2020-01-03+01:00` and dispatch date `2019-12-26Z` retain their original suffix separately; neither supplies an event time.
 
-The curated projection will use an explicit field allowlist and exclude contact details. Raw archives remain private. Constructed test fixtures contain no real contact information. Check reuse terms before publishing any real excerpts: [TED legal notice](https://ted.europa.eu/en/legal-notice).
+The implemented projection uses an explicit field allowlist and excludes contact details. Raw archives remain private. Constructed test fixtures contain no real contact information. Check reuse terms before publishing any real excerpts: [TED legal notice](https://ted.europa.eu/en/legal-notice).
 
 ## Publication changes and acquisition history
 

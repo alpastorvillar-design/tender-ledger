@@ -1,6 +1,9 @@
 # Scale and SQL requirements
 
-Status: acceptance plan. Archive inspection is implemented; no database load or historical benchmark results are available yet.
+Status: acceptance plan for the historical workload. Archive inspection and
+transactional PostgreSQL loading are implemented, with a verified daily load of
+2,967 real notices. The 100,000-notice rehearsal, minimum million-notice gate,
+historical coverage, and SQL benchmarks remain pending.
 
 ## Dataset and completion gates
 
