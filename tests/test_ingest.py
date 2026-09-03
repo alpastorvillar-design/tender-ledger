@@ -780,6 +780,16 @@ class ConcurrencyTests(IngestTestCase):
         self.assertEqual(self.held_locks(third), 0)
         self.assertTrue(self.lock_is_free(OTHER_PACKAGE))
 
+    def test_cancellation_during_loading_releases_every_nested_acquisition(self):
+        worker = self.new_conn()
+        with mock.patch(
+            "tender_ledger.loader.project_member", side_effect=KeyboardInterrupt
+        ), self.assertRaises(KeyboardInterrupt):
+            self.ingest(conn=worker)
+
+        self.assertEqual(self.held_locks(worker), 0)
+        self.assertTrue(self.lock_is_free())
+
     def test_different_packages_do_not_block_each_other(self):
         holder = self.new_conn()
         holder.execute("select pg_advisory_lock(hashtext(%s)::int8)", (OTHER_PACKAGE,))
@@ -867,6 +877,34 @@ class ConstraintTests(IngestTestCase):
         )
         with self.assertRaises(psycopg.errors.ForeignKeyViolation):
             self.insert_checkpoint(source_package_id=PACKAGE, artifact_sha256="0" * 64)
+
+    def test_a_checkpoint_cannot_name_a_run_from_another_package(self):
+        other_run = self.conn.execute(
+            "insert into tl_work.ingest_run (source_package_id, attempt_ordinal)"
+            " values (%s, 1) returning run_id",
+            (OTHER_PACKAGE,),
+        ).fetchone()[0]
+        self.conn.execute(
+            "delete from tl_work.package_checkpoint where source_package_id = %s", (PACKAGE,)
+        )
+        with self.assertRaises(psycopg.errors.ForeignKeyViolation):
+            self.insert_checkpoint(source_package_id=PACKAGE, run_id=other_run)
+
+    def test_a_checkpoint_cannot_change_the_capture_notice_count(self):
+        with self.assertRaises(psycopg.errors.ForeignKeyViolation):
+            self.conn.execute(
+                "update tl_work.package_checkpoint set notice_count = notice_count + 1"
+                " where source_package_id = %s",
+                (PACKAGE,),
+            )
+
+    def test_checkpoint_currency_rechecks_that_its_run_is_completed(self):
+        self.conn.execute(
+            "update tl_work.ingest_run set phase = 'source_verified', completed_at = null"
+            " where run_id = %s",
+            (self.result.run_id,),
+        )
+        self.assertFalse(self.status()["checkpoint_is_current"])
 
     def test_a_completed_run_must_carry_a_completion_time(self):
         with self.assertRaises(psycopg.errors.CheckViolation):

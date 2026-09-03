@@ -98,18 +98,20 @@ Every comparison is written `(...) is true`, so an unknown value satisfies
 nothing. If the statement writes no row, none of that held and no checkpoint
 exists. The committed row is read back before the command reports success.
 
-Two composite foreign keys make the wrong reference impossible rather than
-merely unlikely: the checkpoint's capture must belong to the same package and
-carry the same checksum and contract, and its attempt must be an attempt on that
-same capture. A `CHECK` constraint cannot see another table, so it is not claimed
-to enforce any of this.
+Composite foreign keys make the wrong reference impossible rather than merely
+unlikely: the named run must carry the same package, capture, attempt and
+artifact; the capture must carry the same package, artifact, contract and notice
+count; and the verification attempt must carry that capture, artifact and
+contract. A `CHECK` constraint cannot see another table, so it is not claimed to
+enforce any of this.
 
 ### Current versus historical
 
 Whether a sealed checkpoint still describes the package is **derived**, not
 stored, in `tl_read.package_ingest_status`: the published pointer still points at
-the checkpoint's capture, that capture's coverage still stands, and its latest
-attempt is still the one cited. So:
+the checkpoint's capture, the named run is complete, its counts and references
+still agree, that capture's coverage still stands, and its latest attempt is
+still the one cited. So:
 
 * `load --force-recapture` publishes another capture and the old checkpoint stops
   being current;

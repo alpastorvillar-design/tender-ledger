@@ -120,21 +120,44 @@ def load_package(
         lock_wait=lock_wait, force_recapture=force_recapture,
         on_capture=on_capture,
     )
+    try:
+        result = _load_capture(
+            conn,
+            path,
+            begin,
+            sha256,
+            limits,
+            before_publish,
+        )
+    except BaseException:
+        repo.release_lock_quietly(conn, source_package_id)
+        raise
+    repo.release_lock(conn, source_package_id)
+    return result
+
+
+def _load_capture(
+    conn: psycopg.Connection,
+    path: Path,
+    begin: repo.BeginResult,
+    sha256: str,
+    limits: Limits,
+    before_publish,
+) -> LoadResult:
+    """Run one capture while ``load_package`` owns its single lock acquisition."""
     capture = begin.capture
 
     if begin.already_complete:
-        repo.release_lock(conn, source_package_id)
         return _load_result(conn, capture.capture_id, resumed=True)
 
     # A capture that reconciled but never published only needs the publish step.
     if capture.status == "loaded":
-        return _publish(conn, capture.capture_id, source_package_id, before_publish, resumed=True)
+        return _publish(conn, capture.capture_id, before_publish, resumed=True)
 
     if capture.batch_size is None:
         # Captures written before 0002 never recorded how the archive was split,
         # so a resume cannot line its ordinals up with the committed batches.
         # Refuse before writing rather than silently repartitioning.
-        repo.release_lock_quietly(conn, source_package_id)
         raise repo.CaptureError(
             f"capture {capture.capture_id} predates the recorded batch size and"
             " cannot be resumed safely; re-acquire the package with force_recapture"
@@ -179,7 +202,6 @@ def load_package(
     except (PackageError, psycopg.Error) as exc:
         detail = f"{type(exc).__name__}: {exc}"
         if isinstance(exc, psycopg.Error) and _is_transient(exc):
-            repo.release_lock_quietly(conn, source_package_id)
             try:
                 return _load_result(
                     conn, capture.capture_id, begin.resumed, load_error=detail
@@ -187,23 +209,29 @@ def load_package(
             except psycopg.Error:
                 raise exc from None  # the connection is gone; report what broke
         try:
-            repo.fail_capture(conn, capture.capture_id, detail)
+            repo.fail_capture(
+                conn, capture.capture_id, detail, release_capture_lock=False
+            )
         except (psycopg.Error, repo.CaptureError):
             # Marking the failure needs the same connection. If that write cannot
             # happen, the original error is what the operator has to see.
             raise exc from None
         return _load_result(conn, capture.capture_id, begin.resumed)
 
-    return _publish(conn, capture.capture_id, source_package_id, before_publish, begin.resumed)
+    return _publish(conn, capture.capture_id, before_publish, begin.resumed)
 
 
-def _publish(conn, capture_id, source_package_id, before_publish, resumed):
+def _publish(conn, capture_id, before_publish, resumed):
     """Publish is a separate, recoverable step: a failure here keeps the capture
     in ``loaded`` (retriable) and does not touch the previously visible one."""
     try:
-        repo.publish(conn, capture_id, before_commit=before_publish)
+        repo.publish(
+            conn,
+            capture_id,
+            before_commit=before_publish,
+            release_capture_lock=False,
+        )
     except Exception as exc:  # any publish failure keeps the capture retriable
-        repo.release_lock_quietly(conn, source_package_id)
         try:
             return _load_result(
                 conn, capture_id, resumed, publish_error=f"{type(exc).__name__}: {exc}"

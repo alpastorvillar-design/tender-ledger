@@ -27,9 +27,16 @@ alter table tl_work.capture
     add constraint capture_package_key unique (capture_id, source_package_id);
 alter table tl_work.capture
     add constraint capture_artifact_key
-    unique (capture_id, source_package_id, artifact_sha256, contract_version);
+    unique (
+        capture_id, source_package_id, artifact_sha256, contract_version,
+        distinct_notice_count
+    );
 alter table tl_work.verification_attempt
-    add constraint verification_attempt_capture_key unique (attempt_id, capture_id);
+    add constraint verification_attempt_capture_key
+    unique (attempt_id, capture_id);
+alter table tl_work.verification_attempt
+    add constraint verification_attempt_artifact_key
+    unique (attempt_id, capture_id, artifact_sha256, contract_version);
 
 create table tl_work.ingest_run (
     run_id            bigint generated always as identity primary key,
@@ -57,6 +64,9 @@ create table tl_work.ingest_run (
     completed_at      timestamptz,
 
     unique (source_package_id, attempt_ordinal),
+    constraint ingest_run_checkpoint_key unique (
+        run_id, source_package_id, capture_id, verification_attempt_id, artifact_sha256
+    ),
     foreign key (capture_id, source_package_id)
         references tl_work.capture (capture_id, source_package_id),
     foreign key (verification_attempt_id, capture_id)
@@ -95,7 +105,7 @@ create index ingest_run_package_idx on tl_work.ingest_run (source_package_id, ru
 -- and keeping two records of the same fact invites them to disagree.
 create table tl_work.package_checkpoint (
     source_package_id       text    primary key,
-    run_id                  bigint  not null references tl_work.ingest_run (run_id),
+    run_id                  bigint  not null,
     capture_id              bigint  not null,
     verification_attempt_id bigint  not null,
     artifact_sha256         text    not null,
@@ -109,11 +119,22 @@ create table tl_work.package_checkpoint (
     -- attempt is still its latest -- is a condition between tables that changes
     -- over time, so it is derived in the view below and re-checked inside the
     -- sealing transaction, not asserted by a constraint.
-    foreign key (capture_id, source_package_id, artifact_sha256, contract_version)
+    foreign key (
+        run_id, source_package_id, capture_id, verification_attempt_id, artifact_sha256
+    ) references tl_work.ingest_run (
+        run_id, source_package_id, capture_id, verification_attempt_id, artifact_sha256
+    ),
+    foreign key (
+        capture_id, source_package_id, artifact_sha256, contract_version, notice_count
+    )
         references tl_work.capture
-            (capture_id, source_package_id, artifact_sha256, contract_version),
-    foreign key (verification_attempt_id, capture_id)
-        references tl_work.verification_attempt (attempt_id, capture_id)
+            (capture_id, source_package_id, artifact_sha256, contract_version,
+             distinct_notice_count),
+    foreign key (
+        verification_attempt_id, capture_id, artifact_sha256, contract_version
+    ) references tl_work.verification_attempt (
+        attempt_id, capture_id, artifact_sha256, contract_version
+    )
 );
 
 -- Run history for the reader role: phases, errors and what each run referenced.
@@ -175,8 +196,18 @@ create view tl_read.package_ingest_status as
             and cap.coverage_verified
             and cap.artifact_sha256 = cp.artifact_sha256
             and cap.contract_version = cp.contract_version
+            and cap.member_count = cp.notice_count
+            and cap.distinct_notice_count = cp.notice_count
+            and cap.loaded_row_count = cp.notice_count
+            and checkpoint_run.phase = 'completed'
+            and checkpoint_run.source_package_id = cp.source_package_id
+            and checkpoint_run.capture_id = cp.capture_id
+            and checkpoint_run.verification_attempt_id = cp.verification_attempt_id
+            and checkpoint_run.artifact_sha256 = cp.artifact_sha256
             and latest.attempt_id = cp.verification_attempt_id
             and latest.state = 'verified'
+            and latest.artifact_sha256 = cp.artifact_sha256
+            and latest.contract_version = cp.contract_version
         ) is true, false)                           as checkpoint_is_current,
         openrun.run_id                              as open_run_id,
         openrun.phase                               as open_run_phase,
@@ -184,10 +215,11 @@ create view tl_read.package_ingest_status as
         openrun.last_error                          as open_run_last_error
     from packages p
     left join tl_work.package_checkpoint cp on cp.source_package_id = p.source_package_id
+    left join tl_work.ingest_run checkpoint_run on checkpoint_run.run_id = cp.run_id
     left join tl_work.published_capture pub on pub.source_package_id = p.source_package_id
     left join tl_work.capture cap on cap.capture_id = pub.capture_id
     left join lateral (
-        select v.attempt_id, v.state
+        select v.attempt_id, v.state, v.artifact_sha256, v.contract_version
         from tl_work.verification_attempt v
         where v.capture_id = pub.capture_id
         order by v.attempt_id desc

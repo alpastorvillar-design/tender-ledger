@@ -327,6 +327,27 @@ class OverlapTests(LoaderTestCase):
 
 
 class ConcurrencyTests(LoaderTestCase):
+    def test_an_aborted_capture_link_rolls_back_and_releases_its_lock(self):
+        pkg = self.package("hook", [legacy_member(1)])
+        sha, size = _digest(pkg)
+        writer = self.new_conn()
+
+        def abort(_conn, _capture):
+            raise RuntimeError("link failed")
+
+        with self.assertRaisesRegex(RuntimeError, "link failed"):
+            repo.begin_capture(
+                writer,
+                "daily/hook",
+                sha,
+                size,
+                batch_size=100,
+                on_capture=abort,
+            )
+
+        self.assertEqual(self.captures("daily/hook"), 0)
+        self.assertTrue(self.lock_is_free("daily/hook"))
+
     def test_second_capture_of_the_same_package_is_refused_while_one_is_open(self):
         pkg = self.package("p", [legacy_member(1)])
         sha, size = _digest(pkg)

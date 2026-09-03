@@ -200,15 +200,18 @@ def begin_capture(
     if batch_size < 1:
         raise CaptureError("batch_size must be a positive integer")
     acquire_lock(conn, source_package_id, wait=lock_wait)
-
-    with conn.transaction():
-        result = _decide_capture(
-            conn, source_package_id, artifact_sha256, artifact_bytes,
-            batch_size=batch_size, contract_version=contract_version,
-            force_recapture=force_recapture,
-        )
-        if on_capture is not None:
-            on_capture(conn, result.capture)
+    try:
+        with conn.transaction():
+            result = _decide_capture(
+                conn, source_package_id, artifact_sha256, artifact_bytes,
+                batch_size=batch_size, contract_version=contract_version,
+                force_recapture=force_recapture,
+            )
+            if on_capture is not None:
+                on_capture(conn, result.capture)
+    except BaseException:
+        release_lock_quietly(conn, source_package_id)
+        raise
     return result
 
 
@@ -370,6 +373,7 @@ def publish(
     capture_id: int,
     *,
     before_commit: Callable[[psycopg.Connection], None] | None = None,
+    release_capture_lock: bool = True,
 ) -> None:
     """Make a reconciled capture the visible one for its source package.
 
@@ -377,7 +381,9 @@ def publish(
     happen in one transaction. ``before_commit`` runs inside it: raising from it
     (a future coverage gate, or a simulated failure in tests) aborts the publish
     and leaves visibility and completion status untouched. The advisory lock is
-    released only after the transaction commits.
+    released only after the transaction commits. A higher-level owner may pass
+    ``release_capture_lock=False`` and release this acquisition in its own
+    success/error boundary.
     """
     require_transaction_owner(conn)
     with conn.transaction():
@@ -417,10 +423,18 @@ def publish(
         )
         if before_commit is not None:
             before_commit(conn)
-    release_lock(conn, package)
+    if release_capture_lock:
+        release_lock(conn, package)
 
 
-def fail_capture(conn: psycopg.Connection, capture_id: int, reason: str) -> None:
+def fail_capture(
+    conn: psycopg.Connection,
+    capture_id: int,
+    reason: str,
+    *,
+    release_capture_lock: bool = True,
+) -> None:
+    """Condemn a capture, optionally leaving lock release to a higher-level owner."""
     require_transaction_owner(conn)
     with conn.transaction():
         row = conn.execute(
@@ -434,5 +448,5 @@ def fail_capture(conn: psycopg.Connection, capture_id: int, reason: str) -> None
                 " where capture_id = %s",
                 (reason[:2000], capture_id),
             )
-    if row is not None:
+    if row is not None and release_capture_lock:
         release_lock(conn, row[0])
