@@ -13,6 +13,11 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def default_data_root() -> Path:
+    """Where downloaded archives live. Ignored by Git, like the ``.env`` beside it."""
+    return _REPO_ROOT / "data"
+
+
 @dataclass(frozen=True)
 class DbConfig:
     host: str
