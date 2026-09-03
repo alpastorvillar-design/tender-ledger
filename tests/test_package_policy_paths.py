@@ -39,10 +39,6 @@ MONTHLY = "monthly/2023-11"
 OVERSIZED = DAILY_POLICY.member_bytes + 1024
 
 
-def setUpModule():
-    ensure_test_database()
-
-
 class _ArchiveHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -118,6 +114,8 @@ class InspectPolicyTests(PolicyPathTestCase):
 
 
 class LoadPolicyTests(PolicyPathTestCase):
+    setUpClass = classmethod(lambda cls: ensure_test_database())
+
     def setUp(self):
         super().setUp()
         self.conn = db.connect(load_config(dbname=TEST_DB))
@@ -145,6 +143,8 @@ class LoadPolicyTests(PolicyPathTestCase):
 
 
 class IngestPolicyTests(PolicyPathTestCase):
+    setUpClass = classmethod(lambda cls: ensure_test_database())
+
     def setUp(self):
         super().setUp()
         self.conn = db.connect(load_config(dbname=TEST_DB))

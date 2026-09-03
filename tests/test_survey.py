@@ -45,10 +45,6 @@ UNSUPPORTED_ROOT = (
 )
 
 
-def setUpModule():
-    ensure_test_database()
-
-
 class SurveyTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -303,6 +299,9 @@ class SurveyCliTests(SurveyTestCase):
 
 
 class LoadStaysFailClosedTests(SurveyTestCase):
+    # The only case here that needs a database; the survey itself never uses one.
+    setUpClass = classmethod(lambda cls: ensure_test_database())
+
     def test_one_unsupported_member_condemns_the_whole_capture(self):
         conn = db.connect(load_config(dbname=TEST_DB))
         self.addCleanup(conn.close)
