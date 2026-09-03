@@ -14,7 +14,17 @@ from .package_contract import DAILY_POLICY, ResourcePolicy, policy_for
 
 
 class PackageError(ValueError):
-    """An archive violates the supported source contract or resource limits."""
+    """An archive violates the supported source contract or resource limits.
+
+    ``code`` names the rejection so the survey can count it without parsing
+    prose, and ``detail`` carries the one bounded value worth reporting for that
+    code -- today, the XML root a member turned out to have.
+    """
+
+    def __init__(self, message: str, *, code: str = "archive", detail: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True, order=True)
@@ -26,7 +36,9 @@ class NoticeKey:
     def parse(cls, value: str) -> "NoticeKey":
         match = re.fullmatch(r"([0-9]{1,8})[-_]([1-9][0-9]{3})(?:\.xml)?", value)
         if match is None or int(match[1]) == 0:
-            raise PackageError(f"Invalid publication reference: {value!r}")
+            raise PackageError(
+                f"Invalid publication reference: {value!r}", code="invalid_identity"
+            )
         return cls(year=int(match[2]), number=int(match[1]))
 
 
@@ -87,16 +99,22 @@ def parse_notice(member_name: str, xml: bytes) -> tuple[ET.Element, NoticeKey, s
     try:
         text = xml.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise PackageError(f"Unsupported XML encoding in {member_name}") from exc
+        raise PackageError(
+            f"Unsupported XML encoding in {member_name}", code="unsupported_encoding"
+        ) from exc
     if "\x00" in text or re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
-        raise PackageError(f"Unsupported XML declaration in {member_name}")
+        raise PackageError(
+            f"Unsupported XML declaration in {member_name}", code="unsupported_declaration"
+        )
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
-        raise PackageError(f"Malformed XML in {member_name}") from exc
+        raise PackageError(f"Malformed XML in {member_name}", code="malformed_xml") from exc
     if root.tag in LEGACY_ROOTS:
         if NoticeKey.parse(root.get("DOC_ID", "")) != key:
-            raise PackageError(f"Filename and DOC_ID disagree in {member_name}")
+            raise PackageError(
+                f"Filename and DOC_ID disagree in {member_name}", code="identity_mismatch"
+            )
         # Some published legacy members omit VERSION; their namespace still
         # identifies the supported schema family.
         version = root.get("VERSION") or root.tag.split("/")[-2]
@@ -105,15 +123,25 @@ def parse_notice(member_name: str, xml: bytes) -> tuple[ET.Element, NoticeKey, s
         version = root.findtext(f"{CBC}CustomizationID")
         identifier = root.find(f"{CBC}ID")
         if not version or not version.startswith("eforms-sdk-"):
-            raise PackageError(f"Missing or unsupported CustomizationID in {member_name}")
+            raise PackageError(
+                f"Missing or unsupported CustomizationID in {member_name}",
+                code="unsupported_customization",
+            )
         if (
             identifier is None
             or identifier.get("schemeName") != "notice-id"
             or not identifier.text
         ):
-            raise PackageError(f"Missing eForms notice identifier in {member_name}")
+            raise PackageError(
+                f"Missing eForms notice identifier in {member_name}",
+                code="missing_notice_identifier",
+            )
         return root, key, "eforms", version
-    raise PackageError(f"Unsupported XML root in {member_name}: {root.tag}")
+    raise PackageError(
+        f"Unsupported XML root in {member_name}: {root.tag}",
+        code="unsupported_root",
+        detail=root.tag,
+    )
 
 
 def inspect_notice(member_name: str, xml: bytes) -> tuple[NoticeKey, str, str]:
@@ -163,9 +191,18 @@ def _check_member_path(member: tarfile.TarInfo) -> None:
 class _PackageArchive:
     """Walk a gzip-tar TED package one member at a time under fixed resource limits.
 
-    Both the summarizing inspector and the streaming loader read packages through
-    this class so archive-integrity behavior (gzip CRC, tar trailer, member
-    validation, byte limits) is defined once.
+    The summarizing inspector, the streaming loader and the compatibility survey
+    all read packages through this class, so archive-integrity behavior (gzip
+    CRC, tar trailer, safe paths, member types, byte limits) is defined once and
+    cannot drift between a survey and the load it is supposed to predict.
+
+    Two kinds of rejection are deliberately different. An archive-level fault --
+    an unsafe path, a member that is not a regular file, an exhausted limit,
+    truncation, corruption -- makes further reading unsafe or meaningless and
+    always raises. A member-level fault is about one member's content; callers
+    that pass ``on_rejected`` get it reported and the walk continues, which is
+    what turns a first-failure stop into an inventory. The loader passes nothing,
+    so a load stays all-or-nothing.
     """
 
     def __init__(self, path: Path, limits: Limits):
@@ -175,6 +212,7 @@ class _PackageArchive:
         self.expanded_bytes = 0
         self.xml_member_bytes = 0
         self.member_count = 0
+        self.xml_member_count = 0
 
     def __enter__(self) -> "_PackageArchive":
         try:
@@ -200,7 +238,7 @@ class _PackageArchive:
             except OSError:
                 pass
 
-    def members(self):
+    def members(self, *, on_rejected=None):
         try:
             # One header block prevents read-ahead from hiding bytes after the
             # end marker from the explicit trailer check below. Opening here keeps
@@ -213,11 +251,7 @@ class _PackageArchive:
                 _check_member_path(member)
                 if member.isdir():
                     continue
-                if (
-                    not member.isfile()
-                    or member.issparse()
-                    or not member.name.endswith(".xml")
-                ):
+                if not member.isfile() or member.issparse():
                     raise PackageError(f"Unsupported archive member: {member.name!r}")
                 if member.size > self.limits.member_bytes:
                     raise PackageError(f"Member exceeds its byte limit: {member.name}")
@@ -230,10 +264,22 @@ class _PackageArchive:
                     xml = stream.read(self.limits.member_bytes + 1)
                 if len(xml) != member.size:
                     raise PackageError(f"Incomplete member: {member.name}")
-                root, key, form, version = parse_notice(member.name, xml)
                 self.member_count += 1
-                self.xml_member_bytes += member.size
-                yield NoticeMember(root, key, form, version, member.name)
+                try:
+                    if not member.name.endswith(".xml"):
+                        raise PackageError(
+                            f"Unsupported archive member: {member.name!r}",
+                            code="unsupported_member_name",
+                        )
+                    self.xml_member_count += 1
+                    self.xml_member_bytes += member.size
+                    parsed = parse_notice(member.name, xml)
+                except PackageError as exc:
+                    if on_rejected is None:
+                        raise
+                    on_rejected(member.name, exc)
+                    continue
+                yield NoticeMember(*parsed, member.name)
             # tar iteration can stop before gzip's trailer. Consume the rest to
             # check CRC/length and reject non-padding data after the tar.
             while remainder := self._reader.read(64 * 1024):
@@ -253,20 +299,109 @@ def stream_notices(path: Path, limits: Limits = Limits()):
         yield from archive.members()
 
 
+#: Counts in a survey are unbounded; the illustrations beside them are not.
+SURVEY_SAMPLE_LIMIT = 20
+
+
+def survey_package(
+    path: Path, limits: Limits = Limits(), *, source_package_id: str | None = None
+) -> dict:
+    """Inventory one local archive's compatibility without loading anything.
+
+    A load is all-or-nothing: the first member this contract cannot project
+    condemns the whole capture. That is the right behaviour for a load and a bad
+    way to find out what is inside a period nobody has opened before, which is
+    what this is for -- a monthly archive from an era whose schema versions have
+    never been seen should be surveyed before it is downloaded into a capture.
+
+    The walk uses the same archive defenses and the same resource limits as a
+    load, so an archive-level fault still stops it and nothing here can approve
+    bytes a load would refuse. Member-level faults are counted by reason instead,
+    and the result says plainly whether the archive is loadable.
+
+    Nothing is written: no capture, no rows, no coverage claim. The output
+    carries counts, schema provenance and sanitized member names -- never XML
+    content, notice fields or filesystem paths.
+    """
+    keys: set[NoticeKey] = set()
+    formats: Counter[str] = Counter()
+    versions: Counter[str] = Counter()
+    roots: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    unsupported_roots: Counter[str] = Counter()
+    duplicates: list[str] = []
+    rejected: list[dict[str, str]] = []
+    rejected_count = 0
+
+    def reject(member_name: str, exc: PackageError) -> None:
+        nonlocal rejected_count
+        rejected_count += 1
+        reasons[exc.code] += 1
+        if exc.detail is not None:
+            unsupported_roots[exc.detail[:200]] += 1
+        if len(rejected) < SURVEY_SAMPLE_LIMIT:
+            rejected.append({"member": _member_label(member_name), "reason": exc.code})
+
+    with _PackageArchive(path, limits) as archive:
+        for member in archive.members(on_rejected=reject):
+            if member.key in keys:
+                # A load fails on this through the primary key. Here it is one
+                # more finding, so the rest of the archive still gets counted.
+                if len(duplicates) < SURVEY_SAMPLE_LIMIT:
+                    duplicates.append(f"{member.key.number}-{member.key.year}")
+                continue
+            keys.add(member.key)
+            formats[member.source_format] += 1
+            versions[member.schema_version] += 1
+            roots[member.root.tag] += 1
+        duplicate_count = archive.xml_member_count - rejected_count - len(keys)
+        return {
+            "source_package_id": source_package_id,
+            "sha256": _digest(path),
+            "compressed_bytes": archive.compressed_bytes,
+            "expanded_bytes": archive.expanded_bytes,
+            "xml_member_bytes": archive.xml_member_bytes,
+            "member_count": archive.member_count,
+            "xml_member_count": archive.xml_member_count,
+            "notice_count": len(keys),
+            "formats": dict(sorted(formats.items())),
+            "schema_versions": dict(sorted(versions.items())),
+            "roots": dict(sorted(roots.items())),
+            "duplicate_identity_count": duplicate_count,
+            "duplicate_identity_sample": duplicates,
+            "incompatible_member_count": rejected_count,
+            "incompatible_reasons": dict(sorted(reasons.items())),
+            "unsupported_roots": dict(unsupported_roots.most_common(SURVEY_SAMPLE_LIMIT)),
+            "unsupported_root_kinds": len(unsupported_roots),
+            "incompatible_sample": rejected,
+            "compatible_for_load": rejected_count == 0 and duplicate_count == 0,
+        }
+
+
+def _member_label(member_name: str) -> str:
+    """A member's own name, without its path and bounded in length."""
+    return PurePosixPath(member_name).name[:120]
+
+
+def _digest(path: Path) -> str:
+    try:
+        with path.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+    except OSError as exc:
+        raise PackageError(f"Unreadable or corrupt archive: {path.name}") from exc
+
+
 def inspect_package(path: Path, limits: Limits = Limits()) -> dict:
     keys: set[NoticeKey] = set()
     formats: Counter[str] = Counter()
     versions: Counter[str] = Counter()
-    try:
-        with path.open("rb") as source:
-            checksum = hashlib.file_digest(source, "sha256").hexdigest()
-    except OSError as exc:
-        raise PackageError(f"Unreadable or corrupt archive: {path.name}") from exc
+    checksum = _digest(path)
     with _PackageArchive(path, limits) as archive:
         for member in archive.members():
             if member.key in keys:
                 raise PackageError(
-                    f"Duplicate publication: {member.key.number}-{member.key.year}"
+                    f"Duplicate publication: {member.key.number}-{member.key.year}",
+                    code="duplicate_identity",
                 )
             keys.add(member.key)
             formats[member.source_format] += 1

@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .packages import Limits, inspect_package, limits_for
+from .packages import Limits, inspect_package, limits_for, survey_package
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -38,6 +38,11 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect.add_argument(
         "--max-notices", type=int,
         help="override the notice ceiling (default 10000, or the package policy)",
+    )
+    inspect.add_argument(
+        "--survey", action="store_true",
+        help="inventory the archive's compatibility instead of stopping at the"
+             " first member that cannot be loaded",
     )
 
     db_cmd = commands.add_parser("db", help="database maintenance")
@@ -129,12 +134,39 @@ def _mib(value: int | None) -> int | None:
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
+    if args.survey:
+        return _cmd_survey(args)
     try:
         result = inspect_package(args.archive, _inspection_limits(args))
     except ValueError as exc:
         print(f"Inspection failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))
+    return 0
+
+
+def _cmd_survey(args: argparse.Namespace) -> int:
+    """Print the compatibility inventory, and exit non-zero unless it is loadable.
+
+    An archive-level fault prints no inventory at all: there is nothing this
+    command can honestly say about an archive it could not finish reading.
+    """
+    try:
+        result = survey_package(
+            args.archive, _inspection_limits(args), source_package_id=args.package_id
+        )
+    except ValueError as exc:
+        print(f"Survey failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    if not result["compatible_for_load"]:
+        print(
+            f"{result['incompatible_member_count']} members and"
+            f" {result['duplicate_identity_count']} repeated identities make this"
+            " archive not loadable; a load publishes nothing from it",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

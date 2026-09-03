@@ -121,6 +121,7 @@ is `false` on the views, on `status`, and on the `LoadResult` returned by `load`
 
 ```sh
 python -m tender_ledger db upgrade
+python -m tender_ledger inspect path/to/package.tar.gz --package-id monthly/2020-01 --survey
 python -m tender_ledger load path/to/package.tar.gz --package-id daily/202300220
 python -m tender_ledger load path/to/package.tar.gz --package-id daily/202300220 --force-recapture
 python -m tender_ledger verify --capture-id 1
@@ -136,6 +137,49 @@ reason on stderr.
 
 Connection settings come from `TL_DB_*` / `POSTGRES_*` environment variables or
 the local `.env`; see `config.py`.
+
+## Surveying an archive before loading it
+
+A load is all-or-nothing on purpose: one member this contract cannot project
+condemns the whole capture, and no partially compatible subset is ever published.
+That is the right behaviour for a load and an expensive way to discover what is
+inside a period nobody has opened — the only archive era this project has ever
+walked is one mixed day of 2023.
+
+```sh
+python -m tender_ledger inspect path/to/package.tar.gz --package-id monthly/2020-01 --survey
+```
+
+The survey streams the same archive through the same walker, the same archive
+defenses and the same resource limits as a load, then counts what a load would
+have stopped at:
+
+| Reported | What it answers |
+| --- | --- |
+| `sha256`, compressed / expanded / XML bytes | Which bytes were surveyed, and what they cost to read |
+| `member_count`, `xml_member_count`, `notice_count` | Members admitted, members named `.xml`, and distinct loadable identities |
+| `formats`, `schema_versions`, `roots` | Which supported eras and schema versions are actually in there |
+| `incompatible_member_count`, `incompatible_reasons` | How many members a load would reject, by reason code |
+| `unsupported_roots`, `unsupported_root_kinds` | Which roots they turned out to have — the finding that decides whether the contract should grow |
+| `duplicate_identity_count`, `duplicate_identity_sample` | Repeated canonical identities, which the primary key would refuse |
+| `incompatible_sample`, samples above | A stable, bounded illustration in archive order |
+| `compatible_for_load` | Whether a load of this archive would publish anything at all |
+
+Two kinds of rejection stay deliberately different. A **member-level** fault —
+a non-XML member, an unparseable identity, a bad encoding, a DTD or entity
+declaration, malformed XML, an unsupported root, a filename that disagrees with
+its `DOC_ID`, a missing eForms customization or identifier — is counted and the
+walk continues, which is what makes an inventory possible. An **archive-level**
+fault — an unsafe member path, a member that is not a regular file, an exhausted
+byte or notice limit, truncation, a bad gzip CRC, a corrupt tar, data after the
+end marker — means further reading is unsafe or meaningless, so the survey stops
+and prints no inventory at all.
+
+The command exits 0 only when `compatible_for_load` is true. It writes nothing:
+no capture, no rows, no checkpoint, and no coverage claim of any kind — a survey
+says what an archive contains, never what the source published. Samples carry
+sanitized member names and reason codes; XML content, notice fields and
+filesystem paths are never reported.
 
 ## Deliberately deferred
 
