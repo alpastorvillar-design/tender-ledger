@@ -4,12 +4,14 @@
 
 A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 
-**Status:** the archive inspector and a transactional package loader into
-PostgreSQL are implemented and validated locally and in GitHub Actions.
-[CI](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33703335177)
-passes lint and 78 tests on Linux with a real PostgreSQL service.
-API coverage verification, the historical run, benchmarks, and orchestration
-are still pending.
+**Status:** the archive inspector, a transactional package loader into
+PostgreSQL, and coverage verification of a loaded capture against the TED Search
+API are implemented. Lint and the full suite pass locally against a real
+PostgreSQL; the published
+[CI run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33703335177)
+covers the loader at 78 tests and predates the verifier. The HTTP package
+downloader, the historical run, benchmarks, and orchestration are still
+pending.
 
 ## Problem
 
@@ -29,7 +31,8 @@ without double counting overlapping source packages.
 | Legacy XML and eForms inspection and projection | 2,967 real notices from one mixed daily package |
 | Durable batch loading and atomic publication | Recovery, reader visibility, concurrency, and corruption tests |
 | SQL over published, deduplicated notices | Monthly counts reconcile to all 2,967 loaded notices |
-| Explicit coverage state | Source coverage remains unverified until the API verifier is implemented |
+| Coverage verification against the Search API | A live run matched all 2,967 identifiers of that capture across 13 requests |
+| Explicit coverage state | Verified, mismatch, unavailable and unconfirmed-empty are four different answers, each with its recorded evidence |
 
 ## Architecture
 
@@ -40,16 +43,20 @@ flowchart LR
     C --> D["Reconcile<br/>capture"]
     D --> E["Atomic<br/>publication"]
     E --> F["SQL consumption<br/>views"]
+    G["TED Search API"] --> H["Verify coverage"]
+    E --> H
+    H --> F
 ```
 
-Python implements archive handling and ingestion. PostgreSQL stores notice data
-and transactional state; Docker Compose provides the local database. A restricted
-reader role sees published notice rows while incomplete replacements remain
-internal. The planned HTTP downloader and TED Search API verifier will establish
-source coverage; Airflow will later coordinate the verified workflow.
+Python implements archive handling, ingestion and verification. PostgreSQL stores
+notice data and transactional state; Docker Compose provides the local database.
+A restricted reader role sees published notice rows while incomplete replacements
+remain internal. The planned HTTP downloader will fetch packages, and Airflow will
+later coordinate the verified workflow.
 
 See [source and design decisions](docs/design.md),
-[transaction boundaries and recovery](docs/loading.md), and
+[transaction boundaries and recovery](docs/loading.md),
+[coverage verification](docs/verification.md), and
 [field projection](docs/projection.md).
 
 ## Quick start
@@ -106,7 +113,7 @@ The inspector prints a JSON summary with checksums, distinct notice counts, form
 
 Defaults are 64 MiB compressed, 512 MiB expanded, 8 MiB per member, and 10,000 notices. Limits are explicit CLI options; see `inspect --help`. The identity set uses memory proportional to the notice limit. This bounded inspector is not the historical database loader or a full XML-schema validator.
 
-A successful inspection does not establish source completeness: the output always marks `source_coverage_verified` false. Empty archives remain unverified until the ingestion workflow corroborates their coverage.
+A successful inspection does not establish source completeness: the output always marks `source_coverage_verified` false. That is what `verify` is for, and an empty archive stays unconfirmed even then.
 
 ## Load a package into PostgreSQL
 
@@ -126,6 +133,29 @@ until a replacement publishes. Full semantics and guarantees:
 [transactional loading](docs/loading.md). Example analytical and diagnostic SQL
 is under [`queries/`](queries/).
 
+## Verify what the source says it published
+
+A complete local load is not evidence that the archive held the whole issue:
+
+```sh
+python -m tender_ledger verify --capture-id 1
+```
+
+The capture's identity produces the query - `daily/202300220` is OJ S issue 220
+of 2023, not the 220th day - and the command compares every canonical identifier
+the API reports with the ones in that capture. It exits 0 only when a `verified`
+row is committed. `mismatch`, `unavailable` and `empty_unconfirmed` are three
+different failures, each recorded with its counts, its bounded difference
+samples, and a key digest when a complete key set was seen. `coverage_verified`
+tracks the latest attempt, so a later failure lowers it and keeps the earlier
+evidence in the history.
+
+Ending the walk is the hard part: the source's last page of data was short, and
+the page after it was empty while still returning a pagination token, so neither
+signal ends it. Records, distinct identifiers and the announced total must agree.
+See [coverage verification](docs/verification.md) for the states, budgets, retry
+rules and locking, and [`queries/`](queries/README.md) for reporting them.
+
 ## Query the result
 
 The consumption grain is one canonical publication per row, even when daily and
@@ -143,7 +173,11 @@ remain explicit. These counts describe published notices, not awarded contracts
 or procurement spending.
 
 [Diagnostics](queries/diagnostics.sql) exposes capture status, missing fields,
-schema versions, and source overlap.
+schema versions, and source overlap. [Coverage status](queries/coverage_status.sql)
+reports every published capture including never-verified ones, and
+[verification history](queries/verification_history.sql) lists each capture's
+attempts in order. [`queries/README.md`](queries/README.md) states each query's
+grain and how it treats missing values.
 
 ## Verified evidence
 
@@ -152,7 +186,8 @@ schema versions, and source overlap.
 - A real mixed daily package contained **2,967 distinct notices**: 1,813 legacy and 1,154 eForms. Its complete identifier set matched the API across 12 pages.
 - The inspector processed that package successfully; its checks are covered by automated tests.
 - That same real package (2,967 notices, 1,813 legacy + 1,154 eForms) was loaded into PostgreSQL as an M1 smoke: members, distinct keys, and loaded rows all reconciled at 2,967, a replay was a no-op, and every view reported `source_coverage_verified = false`.
-- The full test suite is **78 tests**, run locally and in Linux CI without skips: archive/projection tests and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, and recovery equivalence.
+- The full test suite is **166 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against a local test server and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and every coverage-verification outcome. The 78-test CI run linked above predates the verifier.
+- A **live verification** of that capture against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests over 7.3 s, with no duplicates and no difference on either side. It ran against a throwaway copy of the capture in a disposable database that was dropped afterwards; the development database was not modified. Its key digest equals the one an independent probe recorded for the same issue.
 - An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
 
 Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03. No cloud deployment or historical performance benchmark has run.
@@ -189,15 +224,18 @@ passed Ruff and all 78 tests on Ubuntu 24.04, Python 3.14.3, and PostgreSQL 17.1
 
 ## Roadmap and limits
 
-1. Download integrity and API coverage verification, with bounded retries and
-   explicit handling of empty or unavailable source periods.
+1. Package download over HTTP with resumable integrity checks, and a coverage
+   checkpoint that stops an automated workflow from treating an unverified
+   window as processed.
 2. A measured rehearsal with at least 100,000 real notices, followed by at least
    one million distinct notices toward the 2020–2025 historical target.
 3. Six SQL workloads with correctness checks, query plans, storage measurements,
    and recovery results; then local Airflow orchestration.
 
-The current real-data validation covers one mixed day. Historical completeness,
-large-dataset performance, and cloud execution have not been demonstrated.
+The current real-data validation covers one mixed day, loaded and verified.
+Historical completeness, large-dataset performance, and cloud execution have not
+been demonstrated. Coverage has been verified for that single capture; it says
+nothing about any other period.
 Source artifacts and database volumes stay outside Git. Synthetic fixtures test
 correctness and failures; they do not count toward the real-data scale target.
 The implemented projection excludes contact details and monetary amounts.

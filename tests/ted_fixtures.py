@@ -1,15 +1,21 @@
-"""Builders for synthetic TED package archives used by the loader tests.
+"""Builders for synthetic TED packages and Search API responses.
 
-Fixtures are structurally faithful to the real element paths (derived from an
-authorized bounded download) but contain no real notice text and no contact
-fields. They are deliberately tiny.
+Archive fixtures are structurally faithful to the real element paths (derived
+from an authorized bounded download) but contain no real notice text and no
+contact fields. They are deliberately tiny. The API builders reproduce the
+response shape observed on 2026-09-03 -- ``notices`` / ``totalNoticeCount`` /
+``timedOut`` / ``iterationNextToken`` -- so the verifier can be driven through
+every pagination outcome without reaching TED.
 """
 
 import gzip
 import io
+import json
 import os
 import tarfile
 import unittest
+
+from tender_ledger.source_api import Response
 
 TEST_DB = os.environ.get("TL_TEST_DB", "tender_ledger_test")
 
@@ -43,7 +49,8 @@ def truncate_all(conn):
     with conn.transaction():
         conn.execute(
             "truncate tl_work.notice_capture, tl_work.capture_batch,"
-            " tl_work.published_capture, tl_work.capture restart identity cascade"
+            " tl_work.verification_attempt, tl_work.published_capture,"
+            " tl_work.capture restart identity cascade"
         )
         conn.execute("alter sequence tl_work.acquisition_seq restart with 1")
 
@@ -157,3 +164,60 @@ def package_bytes(members):
 def write_package(path, members):
     path.write_bytes(package_bytes(members))
     return path
+
+
+DEFAULT_OJS = "220/2023"
+
+
+def search_body(numbers, *, total, token="next-token", year=2023, ojs=DEFAULT_OJS,
+                publication_date="2023-11-15Z", timed_out=False):
+    """One Search API page body. ``token=None`` omits iterationNextToken."""
+    body = {
+        "notices": [
+            {
+                "publication-number": f"{number}-{year}",
+                "publication-date": publication_date,
+                "ojs-number": ojs,
+            }
+            for number in numbers
+        ],
+        "totalNoticeCount": total,
+        "timedOut": timed_out,
+    }
+    if token is not None:
+        body["iterationNextToken"] = token
+    return body
+
+
+def api_page(numbers, *, total, token="next-token", status=200, headers=None, **kwargs):
+    return raw_page(
+        json.dumps(search_body(numbers, total=total, token=token, **kwargs)).encode(),
+        status=status,
+        headers=headers,
+    )
+
+
+def raw_page(body, *, status=200, headers=None):
+    return Response(status=status, headers=headers or {}, body=body)
+
+
+class FakeTransport:
+    """Serve a scripted sequence of responses (or raised errors) in order."""
+
+    def __init__(self, script, *, before_request=None):
+        self.script = list(script)
+        self.requests = []
+        self.before_request = before_request
+
+    def post_json(self, url, payload, *, timeout, max_bytes):
+        self.requests.append(
+            {"url": url, "payload": payload, "timeout": timeout, "max_bytes": max_bytes}
+        )
+        if self.before_request is not None:
+            self.before_request(len(self.requests))
+        if not self.script:
+            raise AssertionError("the walk asked for more pages than the script provides")
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item

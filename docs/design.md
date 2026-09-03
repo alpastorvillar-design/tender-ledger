@@ -1,9 +1,11 @@
 # Design and source contract
 
-Status: source inspection and the transactional PostgreSQL loader are implemented.
-See [projection.md](projection.md) for the field contract and [loading.md](loading.md)
-for the capture/batch/publish semantics and their guarantees. This document keeps
-the source observations and the rationale behind those semantics.
+Status: source inspection, the transactional PostgreSQL loader, and coverage
+verification of one published capture against the Search API are implemented.
+See [projection.md](projection.md) for the field contract, [loading.md](loading.md)
+for the capture/batch/publish semantics, and [verification.md](verification.md)
+for the coverage contract. This document keeps the source observations and the
+rationale behind those semantics.
 
 ## Source selection and observed behavior
 
@@ -21,6 +23,8 @@ Observed on 2026-09-02:
 | API comparison for the mixed day | 12 pages, 2,967 distinct keys, no missing or extra keys |
 | Historical query with ALL / LATEST | 4,523,626 / 0 results, both HTTP 200 |
 | Sunday 2020-01-05 with ALL | 0 reported results; zero is not intrinsically an error |
+
+A second bounded probe of OJ S 220/2023 on 2026-09-03 added the two facts that decide when pagination ends: the final page of data was short (217 of a 250 limit), and the page after it was empty while still returning a non-empty `iterationNextToken`. Twelve data pages plus that terminal page returned 2,967 distinct identifiers, equal to the loaded capture. The package identity `daily/202300220` is that issue ordinal, not the 220th day of the year, and the query is derived from it.
 
 These are observations, not a provider guarantee. Equal counts alone do not establish equal datasets. Archive and API channels share the same provider and can have correlated errors. Record query parameters, capture time, returned total, timeout state, duplicate counts, and available identifier differences.
 
@@ -57,7 +61,7 @@ Implemented in [loading.md](loading.md). In summary:
 1. Hash the whole archive; a mid-run change or truncation cannot publish as complete. (Resumable download is a later slice; the loader takes a local file.)
 2. A capture identity is persisted before any row loads, with source package identity, checksum, and contract version, and survives retries.
 3. Members stream and apply as deterministic batches into capture-scoped rows; batch data and batch status commit together.
-4. Reconcile expected members, distinct keys, and loaded records. Source (API) checks are still deferred, so `source_coverage_verified` stays false.
+4. Reconcile expected members, distinct keys, and loaded records. `load` never sets `source_coverage_verified`; the separate `verify` command establishes it against the API.
 5. Publish is a single transactional pointer swap. `tl_read` views expose only the published capture per package; `tl_work` tables are internal and unreachable by the reader role.
 
 Readers keep seeing the previous complete capture while a replacement is partial or failed - the pointer swap is the only visibility change. Partial batches are never upserted into an exposed current-state table. `tl_read.distinct_notice` collapses repeated content from overlapping daily/monthly packages so it does not inflate the distinct-publication count.

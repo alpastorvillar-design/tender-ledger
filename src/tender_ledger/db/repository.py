@@ -23,6 +23,7 @@ Invariants:
   nothing.
 """
 
+import contextlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -126,10 +127,29 @@ def _acquire_lock(conn: psycopg.Connection, source_package_id: str, wait: bool) 
     return bool(got)
 
 
+def acquire_lock(
+    conn: psycopg.Connection, source_package_id: str, *, wait: bool = False
+) -> None:
+    """Take the package's session advisory lock or refuse. Everything that
+    replaces or inspects a package's published capture -- loading, re-acquiring,
+    verifying -- shares this one key space, so they serialize against each
+    other rather than only against their own kind."""
+    if not _acquire_lock(conn, source_package_id, wait):
+        raise ConcurrentCaptureError(source_package_id)
+
+
 def release_lock(conn: psycopg.Connection, source_package_id: str) -> None:
     conn.execute(
         f"select pg_advisory_unlock({_lock_key_sql('%s')})", (source_package_id,)
     )
+
+
+def release_lock_quietly(conn: psycopg.Connection, source_package_id: str) -> None:
+    """Release the package lock while handling a failure. If the connection is
+    the thing that broke, the lock died with the session anyway and the error
+    being handled matters more than this bookkeeping."""
+    with contextlib.suppress(psycopg.Error):
+        release_lock(conn, source_package_id)
 
 
 _CAPTURE_COLUMNS = (
@@ -172,8 +192,7 @@ def begin_capture(
     require_transaction_owner(conn)
     if batch_size < 1:
         raise CaptureError("batch_size must be a positive integer")
-    if not _acquire_lock(conn, source_package_id, lock_wait):
-        raise ConcurrentCaptureError(source_package_id)
+    acquire_lock(conn, source_package_id, wait=lock_wait)
 
     if not force_recapture:
         # The current attempt decides. Resuming it before looking for a replay is

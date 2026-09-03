@@ -618,13 +618,16 @@ class MigrationUpgradeTests(unittest.TestCase):
             (capture_id,),
         )
 
-        self.assertEqual(db.migrate(self.conn), ["0002_capture_batch_size"])
+        self.assertEqual(
+            db.migrate(self.conn),
+            ["0002_capture_batch_size", "0003_source_verification"],
+        )
 
         row = self.conn.execute(
-            "select status, is_published, member_count, batch_size"
+            "select status, is_published, member_count, batch_size, verification_state"
             " from tl_read.capture_status where capture_id = %s", (capture_id,)
         ).fetchone()
-        self.assertEqual(row, ("published", True, 1, None))
+        self.assertEqual(row, ("published", True, 1, None, None))
         self.assertEqual(
             self.conn.execute(
                 "select publication_ref from tl_read.notice where source_package_id = 'daily/old'"
@@ -632,9 +635,61 @@ class MigrationUpgradeTests(unittest.TestCase):
             "995-2020",
         )
 
+    def test_upgrade_from_0002_keeps_the_capture_and_adds_verification(self):
+        self.assertEqual(
+            db.migrate(self.conn, up_to="0002_capture_batch_size"),
+            ["0001_core", "0002_capture_batch_size"],
+        )
+        capture_id = self.conn.execute(
+            "insert into tl_work.capture (source_package_id, artifact_sha256, artifact_bytes,"
+            " contract_version, status, member_count, distinct_notice_count, loaded_row_count,"
+            " batch_size) values ('daily/202300220', 'abc123', 100, '1', 'published', 1, 1, 1, 500)"
+            " returning capture_id"
+        ).fetchone()[0]
+        self.conn.execute(
+            "insert into tl_work.notice_capture (capture_id, publication_year, publication_number,"
+            " batch_ordinal, source_format, schema_version, source_filename, publication_date,"
+            " publication_date_raw, buyer_country_status, primary_cpv_status)"
+            " values (%s, 2023, 694329, 0, 'legacy', 'R2.0.9', '694329_2023.xml', '2023-11-15',"
+            " '20231115', 'absent', 'absent')",
+            (capture_id,),
+        )
+        self.conn.execute(
+            "insert into tl_work.published_capture (source_package_id, capture_id)"
+            " values ('daily/202300220', %s)",
+            (capture_id,),
+        )
+
+        self.assertEqual(db.migrate(self.conn), ["0003_source_verification"])
+
+        self.assertEqual(
+            self.conn.execute(
+                "select status, is_published, batch_size, source_coverage_verified,"
+                " verification_state, verification_attempt_id"
+                " from tl_read.capture_status where capture_id = %s", (capture_id,)
+            ).fetchone(),
+            ("published", True, 500, False, None, None),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "select publication_ref from tl_read.notice"
+                " where source_package_id = 'daily/202300220'"
+            ).fetchone()[0],
+            "694329-2023",
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "select count(*) from tl_read.verification_attempt"
+            ).fetchone()[0],
+            0,
+        )
+
     def test_clean_install_applies_every_migration(self):
         applied = db.migrate(self.conn)
-        self.assertEqual(applied, ["0001_core", "0002_capture_batch_size"])
+        self.assertEqual(
+            applied,
+            ["0001_core", "0002_capture_batch_size", "0003_source_verification"],
+        )
         self.assertIn(
             "batch_size",
             {
@@ -644,6 +699,12 @@ class MigrationUpgradeTests(unittest.TestCase):
                     " where table_schema = 'tl_work' and table_name = 'capture'"
                 )
             },
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "select to_regclass('tl_work.verification_attempt') is not null"
+            ).fetchone()[0],
+            True,
         )
 
 

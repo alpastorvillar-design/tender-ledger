@@ -17,7 +17,6 @@ marks the capture ``failed``, which no retry resumes. Either way the load report
 an error and the CLI exits non-zero.
 """
 
-import contextlib
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,14 +62,6 @@ def _is_transient(exc: psycopg.Error) -> bool:
         exc.sqlstate[:2] in _TRANSIENT_SQLSTATE_CLASSES
         or exc.sqlstate in _TRANSIENT_SQLSTATES
     )
-
-
-def _release_lock_quietly(conn: psycopg.Connection, source_package_id: str) -> None:
-    """Release the capture lock while handling a failure. If the connection is
-    the thing that broke, the lock died with the session anyway and the error
-    being handled matters more than this bookkeeping."""
-    with contextlib.suppress(psycopg.Error):
-        repo.release_lock(conn, source_package_id)
 
 
 @dataclass(frozen=True)
@@ -139,7 +130,7 @@ def load_package(
         # Captures written before 0002 never recorded how the archive was split,
         # so a resume cannot line its ordinals up with the committed batches.
         # Refuse before writing rather than silently repartitioning.
-        _release_lock_quietly(conn, source_package_id)
+        repo.release_lock_quietly(conn, source_package_id)
         raise repo.CaptureError(
             f"capture {capture.capture_id} predates the recorded batch size and"
             " cannot be resumed safely; re-acquire the package with force_recapture"
@@ -184,7 +175,7 @@ def load_package(
     except (PackageError, psycopg.Error) as exc:
         detail = f"{type(exc).__name__}: {exc}"
         if isinstance(exc, psycopg.Error) and _is_transient(exc):
-            _release_lock_quietly(conn, source_package_id)
+            repo.release_lock_quietly(conn, source_package_id)
             try:
                 return _load_result(
                     conn, capture.capture_id, begin.resumed, load_error=detail
@@ -208,7 +199,7 @@ def _publish(conn, capture_id, source_package_id, before_publish, resumed):
     try:
         repo.publish(conn, capture_id, before_commit=before_publish)
     except Exception as exc:  # any publish failure keeps the capture retriable
-        _release_lock_quietly(conn, source_package_id)
+        repo.release_lock_quietly(conn, source_package_id)
         try:
             return _load_result(
                 conn, capture_id, resumed, publish_error=f"{type(exc).__name__}: {exc}"

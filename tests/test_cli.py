@@ -10,6 +10,8 @@ from pathlib import Path
 
 from ted_fixtures import (
     TEST_DB,
+    FakeTransport,
+    api_page,
     eforms_member,
     ensure_test_database,
     legacy_member,
@@ -18,6 +20,7 @@ from ted_fixtures import (
 )
 from tender_ledger import db
 from tender_ledger.config import load_config
+from tender_ledger.verification import verify_capture
 
 
 def setUpModule():
@@ -83,6 +86,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)["status"], "failed")
         self.assertIn("UniqueViolation", result.stderr)
+
+    def test_verify_refuses_a_capture_it_cannot_check_and_exits_non_zero(self):
+        # No network: the run has to stop on the capture itself, before any HTTP.
+        pkg = write_package(self.dir / "d.tar.gz", [legacy_member(1)])
+        self.run_cli("load", str(pkg), "--package-id", "daily/verifycli")
+        result = self.run_cli("verify", "--capture-id", "999999")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not exist", result.stderr)
+
+        rows = json.loads(self.run_cli("status", "--package-id", "daily/verifycli").stdout)
+        self.assertEqual(rows[0]["verification_state"], None)
+        self.assertFalse(rows[0]["source_coverage_verified"])
+
+    def test_status_reports_the_latest_verification_state(self):
+        pkg = write_package(self.dir / "v.tar.gz", [legacy_member(1)])
+        load = self.run_cli("load", str(pkg), "--package-id", "daily/202300220")
+        capture_id = json.loads(load.stdout)["capture_id"]
+        verify_capture(
+            self.conn, capture_id,
+            transport=FakeTransport([
+                api_page([1], total=1, token="page-2"),
+                api_page([], total=1, token="still-here"),
+            ]),
+        )
+        rows = json.loads(self.run_cli("status", "--package-id", "daily/202300220").stdout)
+        self.assertEqual(rows[0]["verification_state"], "verified")
+        self.assertTrue(rows[0]["source_coverage_verified"])
+        self.assertIsNotNone(rows[0]["verification_finished_at"])
 
     def test_db_upgrade_is_idempotent(self):
         result = self.run_cli("db", "upgrade")

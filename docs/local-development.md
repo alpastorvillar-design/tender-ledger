@@ -1,8 +1,8 @@
 # Local PostgreSQL environment
 
 Status: PostgreSQL runtime verified on 2026-09-03 with Docker Desktop and WSL 2.
-The transactional loader (migrations `0001`-`0002`, capture/batch/publish) runs
-against this database; API coverage verification and the historical run do not.
+The transactional loader (migrations `0001`-`0003`, capture/batch/publish) and the
+coverage verifier run against this database; the historical run does not.
 
 ## Prerequisites
 
@@ -103,9 +103,11 @@ python -m tender_ledger db upgrade          # applies db/migrations/*.sql to ten
 python scripts/run_tests.py                # full suite; any skip is a failure
 ```
 
-`tests/test_packages.py` and `tests/test_projection.py` are standard-library only.
-`tests/test_db.py`, `tests/test_cli.py`, and `tests/test_queries.py` import
-`psycopg` and need the running database; they create and drop a dedicated
+`tests/test_packages.py`, `tests/test_projection.py` and `tests/test_source_api.py`
+are standard-library only; the last drives the HTTP client against a local test
+server and never contacts TED. `tests/test_db.py`, `tests/test_verification.py`,
+`tests/test_cli.py`, and `tests/test_queries.py` import `psycopg` and need the
+running database; they create and drop a dedicated
 `tender_ledger_test` database (never `tender_ledger`, never its volume) and skip
 with a clear message when the server is unreachable. `db upgrade`, `load`, and
 `status` read connection settings from `TL_DB_*` / `POSTGRES_*` or `.env`.

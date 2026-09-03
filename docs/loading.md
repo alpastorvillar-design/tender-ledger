@@ -1,7 +1,8 @@
 # Transactional package loading
 
 Status: implemented for a single package into an unpartitioned PostgreSQL
-baseline. API coverage verification, the historical run, and orchestration are
+baseline. Coverage against the Search API is a separate command, described in
+[verification.md](verification.md). The historical run and orchestration are
 later slices.
 
 ## Data flow
@@ -67,7 +68,8 @@ bookkeeping write that could not happen on it.
 nothing else - views run with the owner's rights, so a reader sees published
 notices through `tl_read.notice` but cannot select `tl_work.notice_capture`.
 Migration `0002` persists the batch size on the capture so a resumed load splits
-the archive the same way even if `--batch-size` changes.
+the archive the same way even if `--batch-size` changes. Migration `0003` adds
+the coverage attempt history behind `source_coverage_verified`.
 
 * `tl_read.notice` - one row per published notice per source package. Daily and
   monthly packages overlap, so a canonical identity can appear more than once
@@ -75,8 +77,11 @@ the archive the same way even if `--batch-size` changes.
 * `tl_read.distinct_notice` - one row per canonical identity across all published
   packages, resolved to the most recently acquired capture. This is the honest
   distinct-notice count; repeated package content does not inflate it.
-* `tl_read.capture_status` - every capture and whether it is the published one.
-  No notice rows, so partial captures stay internal.
+* `tl_read.capture_status` - every capture, whether it is the published one, and
+  the state of its most recent coverage verification. No notice rows, so partial
+  captures stay internal.
+* `tl_read.verification_attempt` - one row per coverage verification attempt.
+  See [verification.md](verification.md).
 
 ## Guarantees
 
@@ -97,13 +102,15 @@ the archive the same way even if `--batch-size` changes.
 | Reader during an incomplete replacement | Still sees the previous complete capture until `publish` commits |
 | Recapture with fewer members (a retired notice) | The replacement capture is complete on its own members; the old capture's extra rows are not merged in |
 | Empty local package | Publishes as a complete capture with `source_coverage_verified = false` - distinct from a failure |
+| Verification running on the package | Shares the loader's advisory lock, so a concurrent load or re-acquisition is refused (or waits with `--lock-wait`) |
 | Two concurrent captures of one package | Serialized by a session advisory lock held until publish commits; the second is refused (`ConcurrentCaptureError`) unless `--lock-wait` |
 | Different `--batch-size` on a resumed load | The size persisted on the capture wins; the requested value is ignored |
 
 "Artifact fully loaded" is tracked separately from "coverage verified against
-TED". The API verifier is a later slice; until it runs, `source_coverage_verified`
+TED". `load` never sets `source_coverage_verified`: a freshly published capture
 is `false` on the views, on `status`, and on the `LoadResult` returned by `load`
-(including replay and failure).
+(including replay and failure) until `verify` succeeds against the API. See
+[verification.md](verification.md).
 
 ## CLI
 
@@ -111,6 +118,7 @@ is `false` on the views, on `status`, and on the `LoadResult` returned by `load`
 python -m tender_ledger db upgrade
 python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220
 python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220 --force-recapture
+python -m tender_ledger verify --capture-id 1
 python -m tender_ledger status --package-id daily/202300220
 ```
 
@@ -127,4 +135,5 @@ the local `.env`; see `config.py`.
 
 Annual partitioning (the baseline keeps year in the natural key so a partitioned
 table can be proven equivalent later), indexes tuned against measured plans, the
-six-query workload and its benchmark, API reconciliation, backfill, and Airflow.
+six-query workload and its benchmark, the HTTP package downloader, a coverage
+checkpoint that gates an automated workflow, backfill, and Airflow.
