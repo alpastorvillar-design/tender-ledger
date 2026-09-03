@@ -1,15 +1,23 @@
 """Capture lifecycle against PostgreSQL: begin, load batches, reconcile, publish.
 
-Invariants this module enforces:
+Connection contract: these functions require an **autocommit** connection (the
+default from ``db.connect``). Each atomic unit is an explicit
+``with conn.transaction()`` block, so it is a real ``BEGIN``/``COMMIT`` visible to
+other connections the moment it returns; single reads run outside a transaction.
+Nothing here commits or rolls back a transaction the caller opened.
+
+Invariants:
 
 * A capture's identity is persisted before any notice row is written, and a retry
-  of the same artifact reuses it. An intentional re-acquisition is a new capture,
-  even when the bytes are identical (A -> B -> A keeps three captures).
+  of the same artifact reuses it -- including from a durable ``loaded`` state or
+  after a failed publish. An intentional re-acquisition (``force_recapture``) is a
+  new capture even when the bytes are identical, so A -> B -> A keeps three.
 * A batch commits its notice rows and its ``capture_batch`` record together.
 * Readers keep seeing the previously published capture until ``publish`` swaps the
   pointer in a single transaction.
-* Concurrent captures of the same source package are serialized by a session
-  advisory lock; a failed publish transaction changes nothing.
+* Concurrent captures of one source package are serialized by a session advisory
+  lock held until the publish transaction commits; a failed publish changes
+  nothing.
 """
 
 from collections.abc import Callable, Sequence
@@ -26,6 +34,8 @@ _NOTICE_COLUMNS = (
     "dispatch_date_raw", "buyer_country", "buyer_country_iso", "buyer_country_status",
     "primary_cpv", "primary_cpv_status", "additional_cpv",
 )
+
+_RESUMABLE_STATUSES = ("acquiring", "loading", "loaded")
 
 
 class CaptureError(RuntimeError):
@@ -50,6 +60,7 @@ class Capture:
     artifact_sha256: str
     contract_version: str
     status: str
+    batch_size: int | None
 
 
 @dataclass(frozen=True)
@@ -67,8 +78,16 @@ class ReconcileResult:
     distinct_notice_count: int
 
 
-def _lock_key_sql(column: str) -> str:
-    return f"hashtext({column})::int8"
+def _require_autocommit(conn: psycopg.Connection) -> None:
+    if not conn.autocommit:
+        raise CaptureError(
+            "the capture repository requires an autocommit connection"
+            " (db.connect() returns one by default)"
+        )
+
+
+def _lock_key_sql(placeholder: str) -> str:
+    return f"hashtext({placeholder})::int8"
 
 
 def _acquire_lock(conn: psycopg.Connection, source_package_id: str, wait: bool) -> bool:
@@ -77,12 +96,10 @@ def _acquire_lock(conn: psycopg.Connection, source_package_id: str, wait: bool) 
         conn.execute(
             f"select pg_advisory_lock({_lock_key_sql('%s')})", (source_package_id,)
         )
-        conn.commit()
         return True
     got = conn.execute(
         f"select pg_try_advisory_lock({_lock_key_sql('%s')})", (source_package_id,)
     ).fetchone()[0]
-    conn.commit()
     return bool(got)
 
 
@@ -90,13 +107,17 @@ def release_lock(conn: psycopg.Connection, source_package_id: str) -> None:
     conn.execute(
         f"select pg_advisory_unlock({_lock_key_sql('%s')})", (source_package_id,)
     )
-    conn.commit()
+
+
+_CAPTURE_COLUMNS = (
+    "capture_id, source_package_id, acquisition_ordinal, artifact_sha256,"
+    " contract_version, status, batch_size"
+)
 
 
 def _load_capture(conn: psycopg.Connection, capture_id: int) -> Capture:
     row = conn.execute(
-        "select capture_id, source_package_id, acquisition_ordinal, artifact_sha256,"
-        " contract_version, status from tl_work.capture where capture_id = %s",
+        f"select {_CAPTURE_COLUMNS} from tl_work.capture where capture_id = %s",
         (capture_id,),
     ).fetchone()
     if row is None:
@@ -110,52 +131,54 @@ def begin_capture(
     artifact_sha256: str,
     artifact_bytes: int,
     *,
+    batch_size: int,
     contract_version: str = CONTRACT_VERSION,
     lock_wait: bool = False,
+    force_recapture: bool = False,
 ) -> BeginResult:
     """Persist (or resume) a capture identity for one source package.
 
-    Resumes an existing ``acquiring``/``loading`` capture only when the artifact
-    checksum and contract version match. Any other case is a new capture.
+    Without ``force_recapture``: an in-progress or durably ``loaded`` capture of
+    the same artifact and contract is resumed; the currently published capture of
+    the same artifact is returned as a no-op. A superseded or failed capture with
+    the same bytes is never reused -- re-acquiring it is a new capture.
+    ``force_recapture`` always creates a new capture.
     """
+    _require_autocommit(conn)
+    if batch_size < 1:
+        raise CaptureError("batch_size must be a positive integer")
     if not _acquire_lock(conn, source_package_id, lock_wait):
         raise ConcurrentCaptureError(source_package_id)
 
-    # Idempotent replay: this exact artifact is already the published capture for
-    # the package, so there is nothing to do. A superseded or failed capture with
-    # the same bytes does not count here -- re-acquiring it is a new capture, so
-    # A -> B -> A keeps three.
-    current = conn.execute(
-        "select c.capture_id from tl_work.capture c"
-        " join tl_work.published_capture p on p.capture_id = c.capture_id"
-        " where c.source_package_id = %s and c.artifact_sha256 = %s"
-        "   and c.contract_version = %s and c.status = 'published'",
-        (source_package_id, artifact_sha256, contract_version),
-    ).fetchone()
-    if current is not None:
-        conn.commit()
-        return BeginResult(
-            capture=_load_capture(conn, current[0]), resumed=True, already_complete=True
-        )
+    if not force_recapture:
+        current = conn.execute(
+            "select c.capture_id from tl_work.capture c"
+            " join tl_work.published_capture p on p.capture_id = c.capture_id"
+            " where c.source_package_id = %s and c.artifact_sha256 = %s"
+            "   and c.contract_version = %s and c.status = 'published'",
+            (source_package_id, artifact_sha256, contract_version),
+        ).fetchone()
+        if current is not None:
+            return BeginResult(
+                capture=_load_capture(conn, current[0]), resumed=True, already_complete=True
+            )
 
-    resumable = conn.execute(
-        "select capture_id from tl_work.capture"
-        " where source_package_id = %s and artifact_sha256 = %s"
-        "   and contract_version = %s and status in ('acquiring', 'loading')"
-        " order by capture_id desc limit 1",
-        (source_package_id, artifact_sha256, contract_version),
-    ).fetchone()
-    if resumable is not None:
-        conn.commit()
-        return BeginResult(capture=_load_capture(conn, resumable[0]), resumed=True)
+        resumable = conn.execute(
+            "select capture_id from tl_work.capture"
+            " where source_package_id = %s and artifact_sha256 = %s"
+            "   and contract_version = %s and status = any(%s)"
+            " order by capture_id desc limit 1",
+            (source_package_id, artifact_sha256, contract_version, list(_RESUMABLE_STATUSES)),
+        ).fetchone()
+        if resumable is not None:
+            return BeginResult(capture=_load_capture(conn, resumable[0]), resumed=True)
 
     capture_id = conn.execute(
         "insert into tl_work.capture"
-        " (source_package_id, artifact_sha256, artifact_bytes, contract_version)"
-        " values (%s, %s, %s, %s) returning capture_id",
-        (source_package_id, artifact_sha256, artifact_bytes, contract_version),
+        " (source_package_id, artifact_sha256, artifact_bytes, contract_version, batch_size)"
+        " values (%s, %s, %s, %s, %s) returning capture_id",
+        (source_package_id, artifact_sha256, artifact_bytes, contract_version, batch_size),
     ).fetchone()[0]
-    conn.commit()
     return BeginResult(capture=_load_capture(conn, capture_id), resumed=False)
 
 
@@ -170,7 +193,8 @@ def committed_batches(conn: psycopg.Connection, capture_id: int) -> set[int]:
 
 
 def clear_uncommitted_rows(conn: psycopg.Connection, capture_id: int) -> int:
-    """Drop notice rows whose batch never committed (defensive; batches are atomic)."""
+    """Drop notice rows whose batch never committed. With real per-batch
+    transactions this should find nothing; it guards the resume invariant."""
     with conn.transaction():
         deleted = conn.execute(
             "delete from tl_work.notice_capture n where n.capture_id = %s"
@@ -211,19 +235,15 @@ def load_batch(
     batch_ordinal: int,
     notices: Sequence[ProjectedNotice],
 ) -> None:
-    """Load one deterministic batch: COPY the rows and record the batch, atomically.
-
-    A duplicate canonical identity (within the batch or against an earlier batch)
-    violates the notice primary key, the transaction rolls back, and the caller
-    fails the capture.
-    """
+    """Load one deterministic batch: COPY the rows and record the batch in one
+    transaction. A duplicate canonical identity violates the notice primary key,
+    the transaction rolls back, and the caller fails the capture."""
+    _require_autocommit(conn)
     columns = ", ".join(_NOTICE_COLUMNS)
     lo = notices[0].source_filename if notices else ""
     hi = notices[-1].source_filename if notices else ""
     with conn.transaction(), conn.cursor() as cur:
-        with cur.copy(
-            f"copy tl_work.notice_capture ({columns}) from stdin"
-        ) as copy:
+        with cur.copy(f"copy tl_work.notice_capture ({columns}) from stdin") as copy:
             for notice in notices:
                 copy.write_row(_row_tuple(capture_id, batch_ordinal, notice))
         cur.execute(
@@ -245,6 +265,7 @@ def reconcile(
     member_count: int,
     distinct_notice_count: int,
 ) -> ReconcileResult:
+    _require_autocommit(conn)
     with conn.transaction():
         loaded = conn.execute(
             "select count(*) from tl_work.notice_capture where capture_id = %s",
@@ -272,9 +293,11 @@ def publish(
 
     The pointer swap, the supersede of the prior capture, and the status change
     happen in one transaction. ``before_commit`` runs inside it: raising from it
-    (a future coverage gate, or a simulated crash in tests) aborts the publish
-    and leaves visibility and completion status untouched.
+    (a future coverage gate, or a simulated failure in tests) aborts the publish
+    and leaves visibility and completion status untouched. The advisory lock is
+    released only after the transaction commits.
     """
+    _require_autocommit(conn)
     with conn.transaction():
         row = conn.execute(
             "select source_package_id, status, member_count, distinct_notice_count,"
@@ -316,6 +339,7 @@ def publish(
 
 
 def fail_capture(conn: psycopg.Connection, capture_id: int, reason: str) -> None:
+    _require_autocommit(conn)
     with conn.transaction():
         row = conn.execute(
             "select source_package_id, status from tl_work.capture"

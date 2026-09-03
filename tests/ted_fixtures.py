@@ -72,14 +72,42 @@ def legacy_member(number, year=2023, *, namespace="R2.0.9",
     return f"{year}-220/{int(number):06d}_{year}.xml", xml.encode("utf-8")
 
 
+_UNSET = object()
+
+
 def eforms_member(number, year=2023, *, customization="eforms-sdk-1.9",
                   pub_date="2023-11-15Z", issue_date="2023-11-14+01:00",
-                  version_id="01", buyer_country="DEU",
-                  main_cpv="72000000", extra_cpv=("72100000",)):
-    country_el = (
-        "<cac:PostalAddress><cac:Country>"
-        f'<cbc:IdentificationCode listName="country">{buyer_country}</cbc:IdentificationCode>'
-        "</cac:Country></cac:PostalAddress>" if buyer_country else ""
+                  version_id="01", buyer_country="DEU", buyer_ref=_UNSET,
+                  orgs=None, main_cpv="72000000", extra_cpv=("72100000",)):
+    """A synthetic eForms notice.
+
+    ``orgs`` is a list of (organisation id, country) pairs; the default is a
+    single buyer organisation ``ORG-0001``. ``buyer_ref`` is the reference the
+    ContractingParty carries: the default matches the first org, ``None`` omits
+    the ContractingParty entirely, ``""`` leaves an empty reference.
+    """
+    if orgs is None:
+        orgs = [("ORG-0001", buyer_country)]
+    if buyer_ref is _UNSET:
+        buyer_ref = orgs[0][0]
+
+    def org_block(org_id, country):
+        country_el = (
+            "<cac:PostalAddress><cac:Country>"
+            f'<cbc:IdentificationCode listName="country">{country}</cbc:IdentificationCode>'
+            "</cac:Country></cac:PostalAddress>" if country else ""
+        )
+        return (
+            "<efac:Organization><efac:Company>"
+            f"<cac:PartyIdentification><cbc:ID>{org_id}</cbc:ID></cac:PartyIdentification>"
+            f"{country_el}</efac:Company></efac:Organization>"
+        )
+
+    organizations = "".join(org_block(oid, c) for oid, c in orgs)
+    contracting_party = (
+        "<cac:ContractingParty><cac:Party><cac:PartyIdentification>"
+        f"<cbc:ID>{buyer_ref}</cbc:ID></cac:PartyIdentification></cac:Party></cac:ContractingParty>"
+        if buyer_ref is not None else ""
     )
     main = (
         f'<cac:MainCommodityClassification><cbc:ItemClassificationCode listName="cpv">{main_cpv}'
@@ -102,17 +130,14 @@ def eforms_member(number, year=2023, *, customization="eforms-sdk-1.9",
         'xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">'
         "<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent><EformsExtension "
         'xmlns="http://data.europa.eu/p27/eforms-ubl-extensions/1">'
-        "<efac:Organizations><efac:Organization><efac:Company>"
-        "<cac:PartyIdentification><cbc:ID>ORG-0001</cbc:ID></cac:PartyIdentification>"
-        f"{country_el}</efac:Company></efac:Organization></efac:Organizations>"
+        f"<efac:Organizations>{organizations}</efac:Organizations>"
         f"<efac:Publication><efbc:NoticePublicationID>{int(number):08d}-{year}</efbc:NoticePublicationID>"
         f"{pub_date_el}</efac:Publication>"
         "</EformsExtension></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>"
         f"<cbc:CustomizationID>{customization}</cbc:CustomizationID>"
         '<cbc:ID schemeName="notice-id">d758d45a-515d-4b92-b441-14c985063716</cbc:ID>'
         f"{issue_el}<cbc:VersionID>{version_id}</cbc:VersionID>"
-        "<cac:ContractingParty><cac:Party><cac:PartyIdentification>"
-        "<cbc:ID>ORG-0001</cbc:ID></cac:PartyIdentification></cac:Party></cac:ContractingParty>"
+        f"{contracting_party}"
         f"<cac:ProcurementProject><cbc:ID>PROJ-{number}</cbc:ID>{main}{extra}</cac:ProcurementProject>"
         "</ContractNotice>"
     )

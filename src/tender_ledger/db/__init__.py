@@ -12,7 +12,10 @@ _MIGRATION_NAME = re.compile(r"^\d{4}_[a-z0-9_]+\.sql$")
 
 
 def connect(config: DbConfig | None = None, *, dbname: str | None = None,
-            autocommit: bool = False) -> psycopg.Connection:
+            autocommit: bool = True) -> psycopg.Connection:
+    """Open a connection. Autocommit by default: the loader and repository own
+    their transaction boundaries with explicit ``with conn.transaction()`` blocks
+    and never leave an implicit transaction open on the caller's connection."""
     config = config or load_config(dbname=dbname)
     return psycopg.connect(**config.conninfo(), autocommit=autocommit)
 
@@ -32,21 +35,24 @@ def _recorded_versions(conn: psycopg.Connection) -> set[str]:
     return {r[0] for r in conn.execute("select version from tl_work.schema_migrations")}
 
 
-def migrate(conn: psycopg.Connection) -> list[str]:
+def migrate(conn: psycopg.Connection, *, up_to: str | None = None) -> list[str]:
     """Apply every migration not yet recorded, each in its own transaction.
 
-    Returns the versions applied by this call; empty when already current.
+    ``up_to`` stops after that version (inclusive); used by tests that exercise
+    the upgrade path from an earlier schema. Returns the versions applied by this
+    call; empty when already current.
     """
     applied: list[str] = []
     known = _recorded_versions(conn)
     for version, sql in _migrations():
-        if version in known:
-            continue
-        with conn.transaction():
-            conn.execute(sql)
-            conn.execute(
-                "insert into tl_work.schema_migrations (version) values (%s)",
-                (version,),
-            )
-        applied.append(version)
+        if version not in known:
+            with conn.transaction():
+                conn.execute(sql)
+                conn.execute(
+                    "insert into tl_work.schema_migrations (version) values (%s)",
+                    (version,),
+                )
+            applied.append(version)
+        if up_to is not None and version == up_to:
+            break
     return applied

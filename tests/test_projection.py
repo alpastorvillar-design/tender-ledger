@@ -33,15 +33,39 @@ def legacy(doc_id="000995-2020", namespace="R2.0.9", version_attr='VERSION="R2.0
     ).encode()
 
 
+_UNSET = object()
+
+
 def eforms(pub_id="00000995-2020", pub_date="2020-01-03Z", issue_date="2019-12-26+01:00",
            customization="eforms-sdk-1.9", version_id="01", buyer_country="DEU",
-           buyer_id="ORG-0001",
+           contracting_ref=_UNSET, orgs=_UNSET,
            main_cpv='<cac:MainCommodityClassification><cbc:ItemClassificationCode listName="cpv">72000000</cbc:ItemClassificationCode></cac:MainCommodityClassification>',
            extra_cpv='<cac:AdditionalCommodityClassification><cbc:ItemClassificationCode listName="cpv">72100000</cbc:ItemClassificationCode></cac:AdditionalCommodityClassification>'):
-    country_el = (
-        f'<cac:PostalAddress><cac:Country>'
-        f'<cbc:IdentificationCode listName="country">{buyer_country}</cbc:IdentificationCode>'
-        f'</cac:Country></cac:PostalAddress>' if buyer_country else ""
+    # orgs: list of (id, country). contracting_ref: the buyer reference the
+    # ContractingParty carries -- default matches the first org, None omits the
+    # ContractingParty, "" leaves an empty reference.
+    if orgs is _UNSET:
+        orgs = [("ORG-0001", buyer_country)]
+    if contracting_ref is _UNSET:
+        contracting_ref = orgs[0][0]
+
+    def org_xml(org_id, country):
+        country_el = (
+            '<cac:PostalAddress><cac:Country>'
+            f'<cbc:IdentificationCode listName="country">{country}</cbc:IdentificationCode>'
+            '</cac:Country></cac:PostalAddress>' if country else ""
+        )
+        return (
+            '<efac:Organization><efac:Company>'
+            f'<cac:PartyIdentification><cbc:ID>{org_id}</cbc:ID></cac:PartyIdentification>'
+            f'{country_el}</efac:Company></efac:Organization>'
+        )
+
+    organizations = "".join(org_xml(oid, c) for oid, c in orgs)
+    contracting_party = (
+        '<cac:ContractingParty><cac:Party><cac:PartyIdentification>'
+        f'<cbc:ID>{contracting_ref}</cbc:ID></cac:PartyIdentification></cac:Party></cac:ContractingParty>'
+        if contracting_ref is not None else ""
     )
     return (
         '<ContractNotice '
@@ -53,15 +77,7 @@ def eforms(pub_id="00000995-2020", pub_date="2020-01-03Z", issue_date="2019-12-2
         'xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">'
         '<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent><EformsExtension '
         'xmlns="http://data.europa.eu/p27/eforms-ubl-extensions/1">'
-        f'<efac:Organizations><efac:Organization><efac:Company>'
-        f'<cac:PartyIdentification><cbc:ID>{buyer_id}</cbc:ID></cac:PartyIdentification>'
-        f'{country_el}</efac:Company></efac:Organization>'
-        '<efac:Organization><efac:Company>'
-        '<cac:PartyIdentification><cbc:ID>ORG-0002</cbc:ID></cac:PartyIdentification>'
-        '<cac:PostalAddress><cac:Country>'
-        '<cbc:IdentificationCode listName="country">FRA</cbc:IdentificationCode>'
-        '</cac:Country></cac:PostalAddress></efac:Company></efac:Organization>'
-        '</efac:Organizations>'
+        f'<efac:Organizations>{organizations}</efac:Organizations>'
         f'<efac:Publication><efbc:NoticePublicationID>{pub_id}</efbc:NoticePublicationID>'
         f'{f"<efbc:PublicationDate>{pub_date}</efbc:PublicationDate>" if pub_date else ""}'
         '</efac:Publication>'
@@ -70,8 +86,7 @@ def eforms(pub_id="00000995-2020", pub_date="2020-01-03Z", issue_date="2019-12-2
         '<cbc:ID schemeName="notice-id">d758d45a-515d-4b92-b441-14c985063716</cbc:ID>'
         f'{f"<cbc:IssueDate>{issue_date}</cbc:IssueDate>" if issue_date else ""}'
         f'<cbc:VersionID>{version_id}</cbc:VersionID>'
-        '<cac:ContractingParty><cac:Party><cac:PartyIdentification>'
-        '<cbc:ID>ORG-0001</cbc:ID></cac:PartyIdentification></cac:Party></cac:ContractingParty>'
+        f'{contracting_party}'
         f'<cac:ProcurementProject><cbc:ID>PROJ-1</cbc:ID>{main_cpv}{extra_cpv}'
         '<cac:RealizedLocation><cac:Address><cac:Country>'
         '<cbc:IdentificationCode listName="country">ITA</cbc:IdentificationCode>'
@@ -146,6 +161,31 @@ class EformsProjectionTests(unittest.TestCase):
         p = project_notice("day/00000995_2020.xml", eforms(buyer_country=""))
         self.assertIsNone(p.buyer_country)
         self.assertEqual(p.buyer_country_status, "absent")
+
+    def test_buyer_country_not_guessed_without_a_contracting_party_reference(self):
+        # One organisation with a known country, but no ContractingParty pointing
+        # at it: the organisation could be a review body or supplier.
+        xml = eforms(contracting_ref=None, orgs=[("ORG-0007", "DEU")])
+        p = project_notice("day/00000995_2020.xml", xml)
+        self.assertIsNone(p.buyer_country)
+        self.assertEqual(p.buyer_country_status, "absent")
+
+    def test_buyer_country_absent_when_reference_is_empty(self):
+        xml = eforms(contracting_ref="", orgs=[("ORG-0007", "DEU")])
+        p = project_notice("day/00000995_2020.xml", xml)
+        self.assertEqual(p.buyer_country_status, "absent")
+
+    def test_buyer_country_absent_when_reference_matches_no_organisation(self):
+        xml = eforms(contracting_ref="ORG-9999", orgs=[("ORG-0001", "DEU")])
+        p = project_notice("day/00000995_2020.xml", xml)
+        self.assertEqual(p.buyer_country_status, "absent")
+
+    def test_buyer_country_resolved_when_a_foreign_org_precedes_the_buyer(self):
+        xml = eforms(contracting_ref="ORG-0001",
+                     orgs=[("ORG-0002", "FRA"), ("ORG-0001", "DEU")])
+        p = project_notice("day/00000995_2020.xml", xml)
+        self.assertEqual(p.buyer_country, "DEU")
+        self.assertEqual(p.buyer_country_iso, "DE")
 
     def test_cpv_primary_and_additional(self):
         p = project_notice("day/00000995_2020.xml", eforms())

@@ -1,0 +1,22 @@
+# Exact versions this project was built and tested against (Python 3.14.3,
+# Windows x86_64, PostgreSQL 17.11). Install with:
+#
+#   python -m pip install -e ".[dev]" -c constraints.txt
+#
+# pyproject.toml keeps floors (psycopg>=3.2); this file pins the resolved set so a
+# second machine reproduces it. Regenerate with `pip freeze --exclude-editable`.
+
+psycopg==3.3.5
+psycopg-binary==3.3.5
+tzdata==2026.3
+
+# dev extra
+pytest==9.1.1
+ruff==0.16.5
+
+# transitive (pytest)
+colorama==0.4.6
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0

@@ -190,27 +190,30 @@ def _project_eforms(root: ET.Element, key, member_name: str, version: str) -> Pr
 
 
 def _eforms_buyer_country(root: ET.Element) -> str | None:
+    """Country of the organisation the ContractingParty points at, or None.
+
+    Without an unambiguous buyer reference the country stays unresolved: another
+    organisation in the notice (a review body, a supplier) is not a substitute.
+    """
     contracting = root.find(f"{_CAC}ContractingParty")
-    buyer_id = None
-    if contracting is not None:
-        buyer_id = contracting.findtext(
-            f"{_CAC}Party/{_CAC}PartyIdentification/{_CBC}ID"
-        )
-    buyer_id = (buyer_id or "").strip()
+    if contracting is None:
+        return None
+    buyer_id = (
+        contracting.findtext(f"{_CAC}Party/{_CAC}PartyIdentification/{_CBC}ID") or ""
+    ).strip()
+    if not buyer_id:
+        return None
     for org in root.iter(f"{_EFAC}Organization"):
         company = org.find(f"{_EFAC}Company")
         if company is None:
             continue
         org_id = (company.findtext(f"{_CAC}PartyIdentification/{_CBC}ID") or "").strip()
-        if buyer_id and org_id != buyer_id:
+        if org_id != buyer_id:
             continue
-        code = company.findtext(
-            f"{_CAC}PostalAddress/{_CAC}Country/{_CBC}IdentificationCode"
+        return (
+            company.findtext(f"{_CAC}PostalAddress/{_CAC}Country/{_CBC}IdentificationCode")
+            or None
         )
-        if code:
-            return code
-        if buyer_id:
-            return None
     return None
 
 

@@ -64,7 +64,7 @@ A successful inspection does not establish source completeness: the output alway
 Requires the local database (see below) and `psycopg`:
 
 ```sh
-python -m pip install -e .
+python -m pip install -e . -c constraints.txt
 python -m tender_ledger db upgrade
 python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220
 python -m tender_ledger status --package-id daily/202300220

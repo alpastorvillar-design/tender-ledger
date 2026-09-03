@@ -29,12 +29,23 @@ publish --------------> one transaction: supersede prior capture, swap
                          tl_work.published_capture pointer, status -> 'published'
 ```
 
+## Connection contract
+
+The loader and the repository require an **autocommit** connection, which
+`db.connect()` returns by default. Each atomic unit - a batch, the reconcile, the
+publish - is an explicit `with conn.transaction()` block, so it is a real
+`COMMIT` visible to other connections the moment it returns. A committed batch
+survives the writer disconnecting; nothing here commits or rolls back a
+transaction the caller opened.
+
 ## Schema
 
 `tl_work` holds the working tables; `tl_read` holds views only. The
 `tender_ledger_reader` role has `USAGE` on `tl_read` and `SELECT` on its views and
 nothing else - views run with the owner's rights, so a reader sees published
 notices through `tl_read.notice` but cannot select `tl_work.notice_capture`.
+Migration `0002` persists the batch size on the capture so a resumed load splits
+the archive the same way even if `--batch-size` changes.
 
 * `tl_read.notice` - one row per published notice per source package. Daily and
   monthly packages overlap, so a canonical identity can appear more than once
@@ -50,19 +61,22 @@ notices through `tl_read.notice` but cannot select `tl_work.notice_capture`.
 | Situation | Behavior |
 | --- | --- |
 | Replay of the same published artifact | No-op; the existing capture is returned, no new identity |
-| Crash mid-load, same artifact | `begin_capture` resumes the `loading` capture; committed batches are skipped; the final state matches a clean run |
-| Intentional re-acquisition (A -> B -> A) | Each is a new capture with its own `acquisition_ordinal`; all three are kept |
-| Duplicate canonical identity in a package | The batch violates the notice primary key, rolls back, and the capture fails |
+| Crash mid-load, same artifact | `begin_capture` resumes the `loading` capture; committed batches are skipped and not rewritten; the final state matches a clean run |
+| Crash between reconcile and publish | The `loaded` capture is durable; a retry resumes it and only publishes |
+| Publish fails (DB error or a rejecting `before_publish` hook) | Capture stays `loaded` and retriable; the result carries `publish_error`; the previous capture stays visible |
+| Intentional re-acquisition (`force_recapture`, A -> B -> A) | Each is a new capture with its own `acquisition_ordinal`; identical bytes still get a new identity; all are kept |
+| Duplicate canonical identity in a package | The batch violates the notice primary key, rolls back with nothing left, and the capture fails |
 | Corrupt / truncated / mid-run-modified archive | `PackageError`; the capture fails and is never published |
 | Reader during an incomplete replacement | Still sees the previous complete capture until `publish` commits |
-| Failed publish transaction | Visibility and completion status unchanged |
 | Recapture with fewer members (a retired notice) | The replacement capture is complete on its own members; the old capture's extra rows are not merged in |
 | Empty local package | Publishes as a complete capture with `source_coverage_verified = false` - distinct from a failure |
-| Two concurrent captures of one package | Serialized by a session advisory lock; the second is refused (`ConcurrentCaptureError`) unless `--lock-wait` |
+| Two concurrent captures of one package | Serialized by a session advisory lock held until publish commits; the second is refused (`ConcurrentCaptureError`) unless `--lock-wait` |
+| Different `--batch-size` on a resumed load | The size persisted on the capture wins; the requested value is ignored |
 
 "Artifact fully loaded" is tracked separately from "coverage verified against
 TED". The API verifier is a later slice; until it runs, `source_coverage_verified`
-is `false` on every view and output.
+is `false` on the views, on `status`, and on the `LoadResult` returned by `load`
+(including replay and failure).
 
 ## CLI
 

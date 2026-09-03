@@ -1,11 +1,13 @@
 # Local PostgreSQL environment
 
 Status: PostgreSQL runtime verified on 2026-09-03 with Docker Desktop and WSL 2.
-Database loading and migrations remain the next implementation task.
+The transactional loader (migrations `0001`-`0002`, capture/batch/publish) runs
+against this database; API coverage verification and the historical run do not.
 
 ## Prerequisites
 
-- Python 3.13 or newer for the current inspector and configuration helper.
+- Python 3.13 or newer. The inspector (`tender_ledger inspect`) needs only the
+  standard library. The loader and its tests need `psycopg`.
 - Docker Engine with Compose v2 or newer, running Linux containers.
 - On Windows, use Docker Desktop with the WSL 2 backend. Follow the official
   [Windows installation guide](https://docs.docker.com/desktop/setup/install/windows-install/).
@@ -79,17 +81,30 @@ the container, and verify that only the committed row remains. Remove only that
 test table afterwards. Record the commands, results, image digest, and runtime
 versions before calling this environment verified.
 
-## Loader schema and tests
-
-With the container healthy:
+## Reproducible environment
 
 ```sh
-python -m pip install -e ".[dev]"
-python -m tender_ledger db upgrade          # applies db/migrations/*.sql to tender_ledger
-PYTHONPATH=src python -m unittest discover -s tests -v
+python -m venv .venv
+. .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]" -c constraints.txt
 ```
 
-The integration tests create and drop a dedicated `tender_ledger_test` database
-(never `tender_ledger`, never the volume) and skip with a clear message if the
-server is unreachable. `db upgrade`, `load`, and `status` read connection
-settings from `TL_DB_*` / `POSTGRES_*` or `.env`.
+`constraints.txt` pins the exact versions this project was validated with
+(`psycopg==3.3.5` and its binary wheel, plus the dev tools). `pyproject.toml`
+keeps only floors. No tools are installed globally.
+
+## Loader schema and tests
+
+With the container healthy and the environment installed:
+
+```sh
+python -m tender_ledger db upgrade          # applies db/migrations/*.sql to tender_ledger
+python -m unittest discover -s tests -v     # or: python -m pytest
+```
+
+`tests/test_packages.py` and `tests/test_projection.py` are standard-library only.
+`tests/test_db.py`, `tests/test_cli.py`, and `tests/test_queries.py` import
+`psycopg` and need the running database; they create and drop a dedicated
+`tender_ledger_test` database (never `tender_ledger`, never its volume) and skip
+with a clear message when the server is unreachable. `db upgrade`, `load`, and
+`status` read connection settings from `TL_DB_*` / `POSTGRES_*` or `.env`.
