@@ -32,6 +32,7 @@ from tender_ledger.source_api import (
     Clock,
     SourceUnavailable,
     TransientSourceError,
+    budgets_for,
     keys_digest,
 )
 from tender_ledger.verification import VerificationError, verify_capture
@@ -607,7 +608,131 @@ class ConstraintTests(VerificationTestCase):
                 )
 
 
+class MonthlyCaptureTests(VerificationTestCase):
+    """A monthly capture is verified against its interval, on both sides."""
+
+    PACKAGE = "monthly/2023-11"
+
+    def publish_month(self, dates, *, package=None):
+        package = package or self.PACKAGE
+        members = [
+            legacy_member(number, date_pub=published)
+            for number, published in enumerate(dates, start=1)
+        ]
+        path = write_package(self.dir / package.replace("/", "_"), members)
+        result = load_package(self.new_conn(), path, package)
+        self.assertEqual(result.status, "published", result.failure_reason)
+        return result.capture_id
+
+    def month_source(self, numbers, *, published="2023-11-15Z", total=None):
+        total = len(numbers) if total is None else total
+        pages = [api_page(numbers, total=total, publication_date=published, token="page-2")]
+        if numbers:
+            pages.append(api_page([], total=total, token="still-here"))
+        return pages
+
+    def test_a_monthly_capture_verifies_against_its_derived_interval(self):
+        capture = self.publish_month(["20231101", "20231130"])
+        result = self.verify(capture, self.month_source([1, 2]))
+
+        self.assertEqual(result.state, "verified")
+        self.assertEqual(result.query, "PD>=20231101 AND PD<=20231130")
+        self.assertEqual(result.scope, "ALL")
+        self.assertEqual(
+            (result.announced_total, result.api_distinct_count, result.local_distinct_count),
+            (2, 2, 2),
+        )
+        self.assertTrue(result.coverage_verified)
+        self.assertEqual(result.api_keys_sha256, keys_digest({(2023, 1), (2023, 2)}))
+
+    def test_a_source_record_outside_the_month_leaves_the_attempt_unavailable(self):
+        capture = self.publish_month(["20231115"])
+        result = self.verify(capture, self.month_source([1], published="2023-12-01Z"))
+        self.assertEqual(result.state, "unavailable")
+        self.assertIn("outside 2023-11-01..2023-11-30", result.reason)
+        self.assertFalse(result.coverage_verified)
+
+    def test_a_local_row_outside_the_month_is_refused_before_any_request(self):
+        # Package composition is a different diagnosis from a coverage
+        # difference, and it is decided from rows this system already holds, so
+        # nothing is asked of the source.
+        capture = self.publish_month(["20231115", "20231201"])
+        result = self.verify(capture, self.month_source([1, 2]))
+
+        self.assertEqual(result.state, "unavailable")
+        self.assertIn("package composition", result.reason)
+        self.assertIn("1 of the capture's 2 notices", result.reason)
+        self.assertIn("2023-11-01..2023-11-30", result.reason)
+        self.assertEqual(self.transport.requests, [])
+        self.assertFalse(result.coverage_verified)
+        self.assertEqual(len(result.reason), len(result.reason.strip()))
+        self.assertLess(len(result.reason), 400)
+
+    def test_the_local_check_records_a_terminal_attempt_it_can_be_read_back_from(self):
+        capture = self.publish_month(["20231001"])
+        result = self.verify(capture, self.month_source([1]))
+        attempts = self.attempts(capture)
+        self.assertEqual([a["state"] for a in attempts], ["unavailable"])
+        self.assertIsNotNone(attempts[0]["finished_at"])
+        self.assertEqual(attempts[0]["local_distinct_count"], 1)
+        # Nothing was learned about the source, so its counts stay unknown.
+        self.assertIsNone(attempts[0]["announced_total"])
+        self.assertIsNone(attempts[0]["api_keys_sha256"])
+        self.assertEqual(result.attempt_id, attempts[0]["attempt_id"])
+        self.assertTrue(self.lock_is_free(self.PACKAGE))
+
+    def test_a_daily_capture_gets_no_invented_date_rule(self):
+        # A daily package's records are proved by their issue ordinal; dates
+        # inside it are whatever the issue published.
+        capture = self.publish(PACKAGE, [1])
+        result = self.verify(capture, source([1]))
+        self.assertEqual(result.state, "verified")
+        self.assertEqual(result.query, "OJ = 220/2023")
+
+    def test_a_monthly_verification_uses_the_monthly_budgets(self):
+        capture = self.publish_month(["20231115"])
+        result = self.verify(capture, [
+            api_page([1], total=50_123, publication_date="2023-11-15Z", token="page-2"),
+            api_page([], total=50_123, token="still-here"),
+        ])
+        # A daily budget would have stopped at 10,000 notices on the first page.
+        self.assertEqual(result.state, "unavailable")
+        self.assertNotIn("budget", result.reason)
+        self.assertIn("for a reported total of 50123", result.reason)
+        self.assertEqual(result.announced_total, 50_123)
+
+    def test_the_safe_endings_still_apply_to_a_monthly_capture(self):
+        capture = self.publish_month(["20231115", "20231116"])
+        result = self.verify(capture, self.month_source([1, 3]))
+        self.assertEqual(result.state, "mismatch")
+        self.assertEqual((result.only_local_count, result.only_api_count), (1, 1))
+        self.assertEqual((result.only_local_sample, result.only_api_sample),
+                         (["2-2023"], ["3-2023"]))
+
+        capture = self.publish_month(["20231117"], package="monthly/2023-10")
+        result = self.verify(capture, [api_page([], total=0)])
+        self.assertEqual(result.state, "unavailable")
+        self.assertIn("package composition", result.reason)
+
+    def test_an_empty_month_on_both_sides_stays_unconfirmed(self):
+        # An empty capture has no row that could fall outside the interval, so
+        # the local check passes it through to the source -- which still cannot
+        # turn zero into coverage.
+        capture = self.publish_month([])
+        result = self.verify(capture, [api_page([], total=0)])
+        self.assertEqual(result.state, "empty_unconfirmed")
+        self.assertIn("zero alone does not", result.reason)
+        self.assertFalse(result.coverage_verified)
+
+
 class BudgetPlumbingTests(VerificationTestCase):
+    def test_the_budgets_come_from_the_package_identity_when_none_are_given(self):
+        capture = self.publish(PACKAGE, [1])
+        self.verify(capture, source([1]))
+        request = self.transport.requests[0]
+        self.assertEqual(request["payload"]["limit"], budgets_for(PACKAGE).page_size)
+        self.assertEqual(request["max_bytes"], budgets_for(PACKAGE).max_response_bytes)
+
     def test_budgets_reach_the_transport(self):
         capture = self.publish(PACKAGE, [1])
         budgets = Budgets(page_size=7, max_response_bytes=1234, operation_timeout=3.0)

@@ -39,6 +39,7 @@ from .source_api import (
     SourceUnavailable,
     Transport,
     UrllibTransport,
+    budgets_for,
     enumerate_publication_keys,
     keys_digest,
     package_query,
@@ -106,7 +107,7 @@ def verify_capture(
     capture_id: int,
     *,
     transport: Transport | None = None,
-    budgets: Budgets = Budgets(),
+    budgets: Budgets | None = None,
     clock: Clock | None = None,
     lock_wait: bool = False,
 ) -> VerificationResult:
@@ -114,6 +115,7 @@ def verify_capture(
     repo.require_transaction_owner(conn)
     capture = _verifiable_capture(conn, capture_id)
     query = package_query(capture.source_package_id)
+    budgets = budgets or budgets_for(capture.source_package_id)
 
     repo.acquire_lock(conn, capture.source_package_id, wait=lock_wait)
     try:
@@ -121,13 +123,21 @@ def verify_capture(
         # lock; re-reading under it is what makes the check meaningful.
         capture = _verifiable_capture(conn, capture_id)
         local_keys = _local_keys(conn, capture_id)
+        composition = _composition_error(conn, capture_id, query)
         attempt_id = _open_attempt(conn, capture, query, len(local_keys))
     except BaseException:
         repo.release_lock_quietly(conn, capture.source_package_id)
         raise
 
     try:
-        outcome = _run(transport, query, budgets, clock, local_keys)
+        # A capture that does not hold what its own identity describes cannot be
+        # compared against the source: the answer would be a set difference, and
+        # the fault is in the package, not in coverage. The source is not asked.
+        outcome = (
+            _Outcome(UNAVAILABLE, composition, None)
+            if composition is not None
+            else _run(transport, query, budgets, clock, local_keys)
+        )
         _close_attempt(conn, attempt_id, capture_id, outcome)
         return _read_attempt(conn, attempt_id)
     finally:
@@ -198,6 +208,46 @@ def _verifiable_capture(conn: psycopg.Connection, capture_id: int) -> _Capture:
             f" distinct={distinct} loaded={loaded}"
         )
     return _Capture(capture_id, package, sha256, contract)
+
+
+def _composition_error(
+    conn: psycopg.Connection, capture_id: int, query: PackageQuery
+) -> str | None:
+    """Why this capture's own rows cannot belong to the package it names.
+
+    The symmetric half of the source-side membership rule: a monthly package is
+    defined by a calendar interval, so a row published outside it means the
+    archive is not the month it was filed under. Only the counts and the extreme
+    offending dates go into the reason -- enough to diagnose, bounded by
+    construction.
+
+    A daily package has no equivalent rule. Its records are proved by their issue
+    ordinal, and the dates inside an issue are whatever it published.
+    """
+    if query.publication_interval is None:
+        return None
+    first, last = query.publication_interval
+    total, outside, missing, earliest, latest = conn.execute(
+        "select count(*),"
+        " count(*) filter (where publication_date is null"
+        "                  or publication_date < %s or publication_date > %s),"
+        " count(*) filter (where publication_date is null),"
+        " min(publication_date) filter (where publication_date < %s),"
+        " max(publication_date) filter (where publication_date > %s)"
+        " from tl_work.notice_capture where capture_id = %s",
+        (first, last, first, last, capture_id),
+    ).fetchone()
+    if not outside:
+        return None
+    extremes = [d.isoformat() for d in (earliest, latest) if d is not None]
+    detail = f" ({', '.join(extremes)})" if extremes else ""
+    undated = f", {missing} of them without a publication date" if missing else ""
+    return (
+        f"{outside} of the capture's {total} notices are published outside"
+        f" {first.isoformat()}..{last.isoformat()}{detail}{undated};"
+        " this is a package composition difference, not a coverage difference,"
+        " so the source was not asked"
+    )
 
 
 def _local_keys(conn: psycopg.Connection, capture_id: int) -> set[tuple[int, int]]:

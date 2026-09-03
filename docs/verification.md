@@ -47,6 +47,21 @@ therefore rests on observed behaviour, which is why both edges of a month, a
 February in a leap year and one outside it are acceptance tests rather than an
 assumption.
 
+### The capture has to hold the month it names
+
+The same rule runs against the rows this system already holds, before anything is
+asked of the source. If a monthly capture contains a notice published outside its
+interval, the archive is not the month it was filed under — a **package
+composition** difference, which is a different diagnosis from a coverage
+difference and would otherwise surface as a meaningless set comparison. The
+attempt is recorded and closed as `unavailable` with a bounded reason naming how
+many rows of how many fall outside, the extreme offending dates, and how many
+carry no publication date at all. No request is made.
+
+A daily capture gets no equivalent rule: the dates inside an OJ S issue are
+whatever that issue published, and its records are already proved by their issue
+ordinal.
+
 The verifier compares the identifiers of **that capture**, not
 `tl_read.distinct_notice`. Daily and monthly packages overlap, so a notice
 missing from the daily capture could be supplied by the monthly one in the
@@ -61,7 +76,7 @@ outcome exits 1 and prints its reason.
 | --- | --- | --- |
 | `verified` | A complete, non-empty, duplicate-free enumeration whose identifier set is exactly the capture's | true |
 | `mismatch` | The enumeration was complete, and the sets differ | false |
-| `unavailable` | Transport, protocol, contract or budget failure — the enumeration cannot be trusted | false |
+| `unavailable` | Transport, protocol, contract or budget failure, or a capture whose own rows fall outside the window it names — no enumeration that can be trusted | false |
 | `empty_unconfirmed` | Source and capture are both empty | false |
 
 `empty_unconfirmed` is not a pass. Zero results does not establish that an issue
