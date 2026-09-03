@@ -332,21 +332,24 @@ def survey_package(
     duplicates: list[str] = []
     rejected: list[dict[str, str]] = []
     rejected_count = 0
+    duplicate_count = 0
 
     def reject(member_name: str, exc: PackageError) -> None:
         nonlocal rejected_count
         rejected_count += 1
         reasons[exc.code] += 1
-        if exc.detail is not None:
+        if exc.code == "unsupported_root" and exc.detail is not None:
             unsupported_roots[exc.detail[:200]] += 1
         if len(rejected) < SURVEY_SAMPLE_LIMIT:
             rejected.append({"member": _member_label(member_name), "reason": exc.code})
 
+    checksum = _digest(path)
     with _PackageArchive(path, limits) as archive:
         for member in archive.members(on_rejected=reject):
             if member.key in keys:
                 # A load fails on this through the primary key. Here it is one
                 # more finding, so the rest of the archive still gets counted.
+                duplicate_count += 1
                 if len(duplicates) < SURVEY_SAMPLE_LIMIT:
                     duplicates.append(f"{member.key.number}-{member.key.year}")
                 continue
@@ -354,10 +357,9 @@ def survey_package(
             formats[member.source_format] += 1
             versions[member.schema_version] += 1
             roots[member.root.tag] += 1
-        duplicate_count = archive.xml_member_count - rejected_count - len(keys)
         return {
             "source_package_id": source_package_id,
-            "sha256": _digest(path),
+            "sha256": checksum,
             "compressed_bytes": archive.compressed_bytes,
             "expanded_bytes": archive.expanded_bytes,
             "xml_member_bytes": archive.xml_member_bytes,

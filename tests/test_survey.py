@@ -178,11 +178,32 @@ class IncompatibleSurveyTests(SurveyTestCase):
         self.assertEqual(result["notice_count"], 2)
         self.assertEqual(result["member_count"], 3)
 
+    def test_a_non_xml_member_is_a_rejection_and_not_a_repeated_identity(self):
+        # The two counters are computed from different populations; a member that
+        # is not XML belongs to neither the loadable identities nor the XML ones.
+        result = self.survey([legacy_member(1), ("readme.txt", b"notes"), legacy_member(2)])
+        self.assertEqual(result["member_count"], 3)
+        self.assertEqual(result["xml_member_count"], 2)
+        self.assertEqual(result["notice_count"], 2)
+        self.assertEqual(result["incompatible_reasons"], {"unsupported_member_name": 1})
+        self.assertEqual(result["duplicate_identity_count"], 0)
+        self.assertEqual(result["duplicate_identity_sample"], [])
+        self.assertFalse(result["compatible_for_load"])
+
     def test_samples_are_bounded_while_the_counts_are_not(self):
-        members = [(f"{n:06d}_2023.xml", b"<broken") for n in range(1, 31)]
-        result = self.survey(members)
+        malformed = [(f"{n:06d}_2023.xml", b"<broken") for n in range(1, 31)]
+        # The canonical identity comes from the member's own name, so the same
+        # notice filed under 25 directories is one identity repeated 24 times.
+        name, xml = legacy_member(1)
+        repeated = [(f"part-{n}/{name.rsplit('/', 1)[-1]}", xml) for n in range(25)]
+        result = self.survey(malformed + repeated)
+
         self.assertEqual(result["incompatible_member_count"], 30)
         self.assertEqual(len(result["incompatible_sample"]), 20)
+        self.assertEqual(result["duplicate_identity_count"], 24)
+        self.assertEqual(len(result["duplicate_identity_sample"]), 20)
+        self.assertEqual(set(result["duplicate_identity_sample"]), {"1-2023"})
+        self.assertEqual(result["notice_count"], 1)
         # A stable prefix in archive order, not an arbitrary selection.
         self.assertEqual(result["incompatible_sample"][0]["member"], "000001_2023.xml")
         self.assertEqual(result["incompatible_sample"][-1]["member"], "000020_2023.xml")
