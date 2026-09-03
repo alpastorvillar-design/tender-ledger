@@ -1,4 +1,5 @@
-"""Command-line entry point: inspect an archive, load one, or verify its coverage."""
+"""Command-line entry point: inspect an archive, load one, verify its coverage,
+or run the whole daily flow and checkpoint it."""
 
 import argparse
 import dataclasses
@@ -40,6 +41,24 @@ def _build_parser() -> argparse.ArgumentParser:
     load.add_argument(
         "--force-recapture", action="store_true",
         help="acquire the package again as a new capture, even for identical bytes",
+    )
+
+    ingest = commands.add_parser(
+        "ingest",
+        help="download, load, verify and checkpoint one daily package",
+    )
+    ingest.add_argument(
+        "--package-id", required=True,
+        help="source package identity, e.g. daily/202300220; it derives the URL",
+    )
+    ingest.add_argument(
+        "--data-dir", type=Path,
+        help="directory holding downloaded archives (default: ./data, ignored by Git)",
+    )
+    ingest.add_argument("--batch-size", type=int, default=500)
+    ingest.add_argument(
+        "--lock-wait", action="store_true",
+        help="wait for concurrent work on the package instead of failing fast",
     )
 
     verify = commands.add_parser(
@@ -103,6 +122,28 @@ def _cmd_load(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    from . import db
+    from .ingest import ingest_package
+
+    with db.connect() as conn:
+        result = ingest_package(
+            conn, args.package_id, data_root=args.data_dir,
+            batch_size=args.batch_size, lock_wait=args.lock_wait,
+        )
+    print(json.dumps(dataclasses.asdict(result), indent=2, default=str))
+    # Success means a checkpoint this run's evidence still satisfies, read back
+    # from the database -- not that every step happened to return without error.
+    if not (result.checkpoint_is_current and result.outcome in ("processed", "replayed")):
+        print(
+            f"{result.source_package_id} is not processed"
+            f" (run {result.run_id} is {result.phase!r}): {result.error}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     from . import db
     from .verification import VERIFIED, verify_capture
@@ -152,6 +193,8 @@ def main() -> int:
             return _cmd_db_upgrade(args)
         if args.command == "load":
             return _cmd_load(args)
+        if args.command == "ingest":
+            return _cmd_ingest(args)
         if args.command == "verify":
             return _cmd_verify(args)
         if args.command == "status":

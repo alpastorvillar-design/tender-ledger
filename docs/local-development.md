@@ -1,8 +1,9 @@
 # Local PostgreSQL environment
 
 Status: PostgreSQL runtime verified on 2026-09-03 with Docker Desktop and WSL 2.
-The transactional loader (migrations `0001`-`0003`, capture/batch/publish) and the
-coverage verifier run against this database; the historical run does not.
+The transactional loader (migrations `0001`-`0004`, capture/batch/publish), the
+coverage verifier and the daily ingest flow run against this database; the
+historical run does not.
 
 ## Prerequisites
 
@@ -44,8 +45,9 @@ bootstrap and loader administrator. Migrations create the restricted
 check its access. A separate least-privilege writer remains future work.
 Do not use these development credentials for a hosted service.
 
-PostgreSQL data lives in the Compose-managed `postgres_data` named volume, not
-inside the Git working tree. Password initialization applies only to an empty
+Downloaded archives live in `data/` at the repository root, which is ignored by
+Git; `--data-dir` moves that root. PostgreSQL data lives in the Compose-managed
+`postgres_data` named volume, not inside the Git working tree. Password initialization applies only to an empty
 volume: editing `.env` later does not change the password of an existing database.
 
 ## Operate without discarding data
@@ -103,9 +105,10 @@ python -m tender_ledger db upgrade          # applies db/migrations/*.sql to ten
 python scripts/run_tests.py                # full suite; any skip is a failure
 ```
 
-`tests/test_packages.py`, `tests/test_projection.py` and `tests/test_source_api.py`
-are standard-library only; the last drives the HTTP client against a local test
-server and never contacts TED. `tests/test_db.py`, `tests/test_verification.py`,
+`tests/test_packages.py`, `tests/test_projection.py`, `tests/test_source_api.py`
+and `tests/test_download.py` are standard-library only; the last two drive the
+HTTP clients against a local test server and never contact TED.
+`tests/test_db.py`, `tests/test_verification.py`, `tests/test_ingest.py`,
 `tests/test_cli.py`, and `tests/test_queries.py` import `psycopg` and need the
 running database; they create and drop a dedicated
 `tender_ledger_test` database (never `tender_ledger`, never its volume) and skip

@@ -1,9 +1,9 @@
 # Source coverage verification
 
 Status: implemented for one published daily capture at a time, against the TED
-Search API. Downloading packages over HTTP, and making a workflow refuse to
-treat a package as processed until its coverage is confirmed, are the next
-slice. Historical coverage and benchmarks are later still.
+Search API. Downloading packages over HTTP and refusing to treat one as
+processed until its coverage is confirmed are implemented on top of this, in
+[ingestion.md](ingestion.md). Historical coverage and benchmarks are later.
 
 "The archive loaded completely" and "the source agrees this is the whole issue"
 are different claims. The loader establishes the first. `verify` is what can
@@ -162,7 +162,8 @@ each capture's attempts in order with the state that preceded them.
 ## Deliberately not done here
 
 `load` still means "the local archive loaded completely" and still publishes
-with `source_coverage_verified = false`. There is no source-window checkpoint
-yet, so nothing marks a package "processed" on the strength of coverage. The
-HTTP package downloader, monthly packages, the publication calendar, backfill,
-Airflow, and the measured SQL workload are all later slices.
+with `source_coverage_verified = false`; running `verify` by hand does not mark
+a package processed either. What does is the checkpoint `ingest` seals, which
+also requires an artifact this system acquired and validated - see
+[ingestion.md](ingestion.md). Monthly packages, the publication calendar,
+backfill, Airflow, and the measured SQL workload are all later slices.

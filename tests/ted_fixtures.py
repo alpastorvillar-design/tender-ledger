@@ -49,7 +49,8 @@ def truncate_all(conn):
     with conn.transaction():
         conn.execute(
             "truncate tl_work.notice_capture, tl_work.capture_batch,"
-            " tl_work.verification_attempt, tl_work.published_capture,"
+            " tl_work.verification_attempt, tl_work.package_checkpoint,"
+            " tl_work.ingest_run, tl_work.published_capture,"
             " tl_work.capture restart identity cascade"
         )
         conn.execute("alter sequence tl_work.acquisition_seq restart with 1")

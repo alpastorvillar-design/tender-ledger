@@ -1,7 +1,9 @@
 """Every shipped query has a correctness fixture and a stated grain."""
 
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import psycopg
@@ -13,11 +15,14 @@ from ted_fixtures import (
     eforms_member,
     ensure_test_database,
     legacy_member,
+    package_bytes,
     truncate_all,
     write_package,
 )
 from tender_ledger import db
 from tender_ledger.config import load_config
+from tender_ledger.download import DownloadBudgets
+from tender_ledger.ingest import ingest_package
 from tender_ledger.loader import load_package
 from tender_ledger.source_api import TransientSourceError
 from tender_ledger.verification import verify_capture
@@ -26,6 +31,8 @@ QUERIES = Path(__file__).resolve().parents[1] / "queries"
 _MONTHLY = (QUERIES / "monthly_notice_counts.sql").read_text()
 _COVERAGE = (QUERIES / "coverage_status.sql").read_text()
 _HISTORY = (QUERIES / "verification_history.sql").read_text()
+_INGEST_STATUS = (QUERIES / "ingest_status.sql").read_text()
+_INGEST_HISTORY = (QUERIES / "ingest_history.sql").read_text()
 
 
 def setUpModule():
@@ -236,6 +243,137 @@ class VerificationHistoryQueryTests(CoverageScenarioTestCase):
         self.assertIsNone(row["duration"])
         coverage = next(r for r in self.rows(_COVERAGE) if r["capture_id"] == capture)
         self.assertEqual(coverage["coverage_state"], "verification in progress")
+
+
+class IngestQueryTestCase(QueryTestCase):
+    """The ingest flow's own diagnostics, driven through the real command."""
+
+    NUMBERS = (1, 2, 3)
+
+    def setUp(self):
+        super().setUp()
+        self.archive = package_bytes([legacy_member(n) for n in self.NUMBERS])
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _ArchiveHandler)
+        self.server.daemon_threads = True
+        self.server.handle_error = lambda request, address: None
+        self.server.payload = self.archive
+        self.server.status = 200
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/p"
+
+    def ingest(self, package="daily/202300220", *, numbers=None, ojs="220/2023"):
+        numbers = self.NUMBERS if numbers is None else numbers
+        return ingest_package(
+            self.new_conn(), package, data_root=self.dir, url=self.url,
+            transport=FakeTransport([
+                api_page(list(numbers), total=len(numbers), ojs=ojs, token="page-2"),
+                api_page([], total=len(numbers), ojs=ojs, token="still-here"),
+            ]),
+            budgets=DownloadBudgets(max_attempts=1),
+        )
+
+    def by_package(self, query):
+        return {row["source_package_id"]: row for row in self.rows(query)}
+
+
+class IngestStatusQueryTests(IngestQueryTestCase):
+    def test_grain_is_one_row_per_package_whatever_its_standing(self):
+        self.ingest()
+
+        # a package loaded by hand: no download, so no checkpoint of one
+        manual = load_package(
+            self.new_conn(),
+            write_package(self.dir / "manual", [legacy_member(9)]),
+            "daily/202300221",
+        )
+        self.assertEqual(manual.status, "published")
+
+        # a package whose only run never got past the source
+        self.server.status = 404
+        crashed = self.ingest("daily/202300222", numbers=[9], ojs="222/2023")
+        self.assertEqual(crashed.outcome, "incomplete")
+
+        rows = self.by_package(_INGEST_STATUS)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows["daily/202300220"]["checkpoint_state"], "processed")
+        self.assertEqual(rows["daily/202300220"]["checkpoint_notice_count"], 3)
+        self.assertEqual(rows["daily/202300221"]["checkpoint_state"], "never checkpointed")
+        self.assertEqual(
+            rows["daily/202300221"]["latest_verification_state"], "never verified"
+        )
+        self.assertIsNone(rows["daily/202300221"]["checkpoint_notice_count"])
+        self.assertEqual(rows["daily/202300222"]["checkpoint_state"], "never checkpointed")
+        self.assertIsNotNone(rows["daily/202300222"]["open_run_id"])
+        self.assertIn("404", rows["daily/202300222"]["open_run_last_error"])
+
+    def test_a_later_acquisition_and_a_later_failed_check_read_differently(self):
+        first = self.ingest()
+        load_package(
+            self.new_conn(), self.dir / first.artifact_path,
+            "daily/202300220", force_recapture=True,
+        )
+        self.assertEqual(
+            self.by_package(_INGEST_STATUS)["daily/202300220"]["checkpoint_state"],
+            "retired by a later acquisition",
+        )
+
+        again = self.ingest()
+        self.assertEqual(again.outcome, "processed")
+        verify_capture(
+            self.new_conn(), again.capture_id,
+            transport=FakeTransport([TransientSourceError("reset")] * 3),
+        )
+        row = self.by_package(_INGEST_STATUS)["daily/202300220"]
+        self.assertEqual(row["checkpoint_state"], "retired by a later coverage check")
+        self.assertEqual(row["latest_verification_state"], "unavailable")
+        self.assertEqual(row["checkpoint_capture_id"], again.capture_id)  # evidence kept
+        self.assertFalse(row["coverage_verified"])
+
+
+class IngestHistoryQueryTests(IngestQueryTestCase):
+    def test_every_run_appears_once_numbered_within_its_package(self):
+        self.server.status = 503
+        self.ingest()
+        self.server.status = 200
+        completed = self.ingest()
+
+        rows = self.rows(_INGEST_HISTORY)
+        self.assertEqual(len(rows), 1)  # the failed attempt was resumed, not replaced
+        self.assertEqual(rows[0]["attempt_ordinal"], 1)
+        self.assertEqual(rows[0]["run_id"], completed.run_id)
+        self.assertEqual(rows[0]["reached"], "checkpoint sealed")
+        self.assertIsNone(rows[0]["last_error"])
+        self.assertIsNotNone(rows[0]["completed_at"])
+
+    def test_an_interrupted_run_keeps_its_phase_error_and_unknown_columns(self):
+        self.server.status = 404
+        self.ingest()
+
+        row = self.rows(_INGEST_HISTORY)[0]
+        self.assertEqual(row["phase"], "starting")
+        self.assertEqual(row["reached"], "interrupted before an artifact was accepted")
+        self.assertIn("404", row["last_error"])
+        for unknown in ("capture_id", "verification_attempt_id", "verification_state",
+                        "artifact_sha256", "completed_at"):
+            with self.subTest(column=unknown):
+                self.assertIsNone(row[unknown])
+        self.assertIsNotNone(row["elapsed"])
+
+
+class _ArchiveHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # BaseHTTPRequestHandler's required naming
+        payload = self.server.payload if self.server.status == 200 else b"unavailable"
+        self.send_response(self.server.status)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
 
 
 if __name__ == "__main__":

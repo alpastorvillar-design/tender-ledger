@@ -2,8 +2,9 @@
 
 Status: implemented for a single package into an unpartitioned PostgreSQL
 baseline. Coverage against the Search API is a separate command, described in
-[verification.md](verification.md). The historical run and orchestration are
-later slices.
+[verification.md](verification.md); acquiring the archive and checkpointing the
+whole flow is a third, described in [ingestion.md](ingestion.md). The historical
+run and orchestration are later slices.
 
 ## Data flow
 
@@ -69,7 +70,11 @@ nothing else - views run with the owner's rights, so a reader sees published
 notices through `tl_read.notice` but cannot select `tl_work.notice_capture`.
 Migration `0002` persists the batch size on the capture so a resumed load splits
 the archive the same way even if `--batch-size` changes. Migration `0003` adds
-the coverage attempt history behind `source_coverage_verified`.
+the coverage attempt history behind `source_coverage_verified`. Migration `0004`
+adds the ingest runs and the package checkpoint described in
+[ingestion.md](ingestion.md), and the composite unique constraints its foreign
+keys point at; captures, batches, notices and the published pointer are
+unchanged by it.
 
 * `tl_read.notice` - one row per published notice per source package. Daily and
   monthly packages overlap, so a canonical identity can appear more than once
@@ -120,6 +125,7 @@ python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202
 python -m tender_ledger load path/to/daily-package.tar.gz --package-id daily/202300220 --force-recapture
 python -m tender_ledger verify --capture-id 1
 python -m tender_ledger status --package-id daily/202300220
+python -m tender_ledger ingest --package-id daily/202300220   # all of the above, checkpointed
 ```
 
 `load` re-runs are safe: an unfinished capture of the same archive is resumed and
@@ -135,5 +141,6 @@ the local `.env`; see `config.py`.
 
 Annual partitioning (the baseline keeps year in the natural key so a partitioned
 table can be proven equivalent later), indexes tuned against measured plans, the
-six-query workload and its benchmark, the HTTP package downloader, a coverage
-checkpoint that gates an automated workflow, backfill, and Airflow.
+six-query workload and its benchmark, monthly packages, backfill, and Airflow.
+The HTTP downloader and the coverage checkpoint now exist; see
+[ingestion.md](ingestion.md).

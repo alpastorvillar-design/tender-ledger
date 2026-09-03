@@ -1,11 +1,13 @@
-"""The load/status/db CLI wiring works end to end against the test database."""
+"""The load/ingest/verify/status CLI wiring works end to end against the test database."""
 
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ted_fixtures import (
@@ -15,12 +17,28 @@ from ted_fixtures import (
     eforms_member,
     ensure_test_database,
     legacy_member,
+    package_bytes,
     truncate_all,
     write_package,
 )
 from tender_ledger import db
 from tender_ledger.config import load_config
+from tender_ledger.ingest import ingest_package
 from tender_ledger.verification import verify_capture
+
+
+class _ArchiveHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # BaseHTTPRequestHandler's required naming
+        self.server.received.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(self.server.payload)))
+        self.end_headers()
+        self.wfile.write(self.server.payload)
+
+    def log_message(self, *args):
+        pass
 
 
 def setUpModule():
@@ -36,6 +54,17 @@ class CliTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
         self.env = {**os.environ, "TL_DB_NAME": TEST_DB, "PYTHONPATH": "src", "PYTHONUTF8": "1"}
+
+    def local_package_server(self, payload):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ArchiveHandler)
+        server.daemon_threads = True
+        server.handle_error = lambda request, address: None
+        server.received = []
+        server.payload = payload
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, f"http://127.0.0.1:{server.server_address[1]}/packages/daily/202300220"
 
     def run_cli(self, *args):
         return subprocess.run(
@@ -114,6 +143,49 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["verification_state"], "verified")
         self.assertTrue(rows[0]["source_coverage_verified"])
         self.assertIsNotNone(rows[0]["verification_finished_at"])
+
+    def test_ingest_refuses_an_unsupported_package_and_exits_non_zero(self):
+        # No server: an unsupported identity has to stop before any request, and
+        # the flow must not invent a checkpoint for it.
+        result = self.run_cli(
+            "ingest", "--package-id", "monthly/202301",
+            "--data-dir", str(self.dir / "data"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("canonical daily package identity", result.stderr)
+        self.assertFalse((self.dir / "data").exists())
+        self.assertEqual(
+            self.conn.execute("select count(*) from tl_work.ingest_run").fetchone()[0], 0
+        )
+
+    def test_ingest_replays_a_current_checkpoint_without_any_request(self):
+        # The CLI has no URL override on purpose, so the download is set up
+        # in-process against a local server and the command exercises the replay
+        # path: no request of any kind leaves this test.
+        server, url = self.local_package_server(
+            package_bytes([legacy_member(1), legacy_member(2)])
+        )
+        first = ingest_package(
+            self.conn, "daily/202300220", data_root=self.dir / "data", url=url,
+            transport=FakeTransport([
+                api_page([1, 2], total=2, token="page-2"),
+                api_page([], total=2, token="still-here"),
+            ]),
+        )
+        self.assertEqual(first.outcome, "processed")
+        requests_before = len(server.received)
+
+        result = self.run_cli(
+            "ingest", "--package-id", "daily/202300220",
+            "--data-dir", str(self.dir / "data"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["outcome"], "replayed")
+        self.assertTrue(payload["checkpoint_is_current"])
+        self.assertEqual(payload["capture_id"], first.capture_id)
+        self.assertEqual(payload["http_attempts"], 0)
+        self.assertEqual(len(server.received), requests_before)
 
     def test_db_upgrade_is_idempotent(self):
         result = self.run_cli("db", "upgrade")

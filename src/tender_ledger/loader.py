@@ -102,7 +102,10 @@ def load_package(
     lock_wait: bool = False,
     force_recapture: bool = False,
     before_publish=None,
+    on_capture=None,
 ) -> LoadResult:
+    """``on_capture`` is passed to :func:`repository.begin_capture`: it commits a
+    caller's record of the chosen capture together with the capture itself."""
     if batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
     repo.require_transaction_owner(conn)
@@ -115,6 +118,7 @@ def load_package(
         conn, source_package_id, sha256, size,
         batch_size=batch_size, contract_version=CONTRACT_VERSION,
         lock_wait=lock_wait, force_recapture=force_recapture,
+        on_capture=on_capture,
     )
     capture = begin.capture
 

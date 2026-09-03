@@ -620,7 +620,7 @@ class MigrationUpgradeTests(unittest.TestCase):
 
         self.assertEqual(
             db.migrate(self.conn),
-            ["0002_capture_batch_size", "0003_source_verification"],
+            ["0002_capture_batch_size", "0003_source_verification", "0004_package_ingest"],
         )
 
         row = self.conn.execute(
@@ -660,7 +660,9 @@ class MigrationUpgradeTests(unittest.TestCase):
             (capture_id,),
         )
 
-        self.assertEqual(db.migrate(self.conn), ["0003_source_verification"])
+        self.assertEqual(
+            db.migrate(self.conn), ["0003_source_verification", "0004_package_ingest"]
+        )
 
         self.assertEqual(
             self.conn.execute(
@@ -688,7 +690,10 @@ class MigrationUpgradeTests(unittest.TestCase):
         applied = db.migrate(self.conn)
         self.assertEqual(
             applied,
-            ["0001_core", "0002_capture_batch_size", "0003_source_verification"],
+            [
+                "0001_core", "0002_capture_batch_size",
+                "0003_source_verification", "0004_package_ingest",
+            ],
         )
         self.assertIn(
             "batch_size",

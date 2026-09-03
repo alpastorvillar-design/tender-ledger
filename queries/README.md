@@ -14,6 +14,8 @@ not extract monetary amounts from notices.
 | [coverage_status.sql](coverage_status.sql) | For each published capture, does the source agree we hold the whole issue? | One row per published capture |
 | [verification_history.sql](verification_history.sql) | What has each capture's coverage check said over time? | One row per verification attempt |
 | [diagnostics.sql](diagnostics.sql) | Load reconciliation, cross-package overlap, field completeness | Stated per query; run them individually |
+| [ingest_status.sql](ingest_status.sql) | For each package, was a checkpoint sealed and does it still describe the package? | One row per source package |
+| [ingest_history.sql](ingest_history.sql) | What did each ingest run do, and how far did it get? | One row per ingest run |
 
 `diagnostics.sql` holds several independent queries. Run them one at a time.
 
@@ -31,6 +33,12 @@ Absent and zero are different answers and are never merged:
   enumerated the whole issue records a key digest.
 * A source and a capture that are both empty give `unconfirmed empty`. Zero
   results does not establish that the issue was published.
+* A package with no ingest checkpoint reports `never checkpointed`, and a
+  package whose checkpoint stopped being current says which of the two things
+  happened -- a later acquisition, or a later coverage check. None of them is
+  merged with "processed".
+* An ingest run that never reached a capture or an attempt leaves those columns
+  `NULL`. That is *the run never got there*, not "no capture exists".
 
 ## Running them
 

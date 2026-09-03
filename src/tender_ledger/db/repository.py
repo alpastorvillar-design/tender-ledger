@@ -178,6 +178,7 @@ def begin_capture(
     contract_version: str = CONTRACT_VERSION,
     lock_wait: bool = False,
     force_recapture: bool = False,
+    on_capture: Callable[[psycopg.Connection, "Capture"], None] | None = None,
 ) -> BeginResult:
     """Persist (or resume) a capture identity for one source package.
 
@@ -188,12 +189,39 @@ def begin_capture(
     capture has overtaken is left alone, and a superseded or failed capture is
     never reused -- re-acquiring it is a new capture. ``force_recapture`` always
     creates a new capture.
+
+    ``on_capture`` runs inside the transaction that decides the capture, so an
+    external record of "this run is loading that capture" is committed with the
+    capture itself. Without it a caller could only write the link afterwards and
+    a crash in between would leave a capture nothing points at, recoverable only
+    by guessing. Raising from the hook aborts the whole decision.
     """
     require_transaction_owner(conn)
     if batch_size < 1:
         raise CaptureError("batch_size must be a positive integer")
     acquire_lock(conn, source_package_id, wait=lock_wait)
 
+    with conn.transaction():
+        result = _decide_capture(
+            conn, source_package_id, artifact_sha256, artifact_bytes,
+            batch_size=batch_size, contract_version=contract_version,
+            force_recapture=force_recapture,
+        )
+        if on_capture is not None:
+            on_capture(conn, result.capture)
+    return result
+
+
+def _decide_capture(
+    conn: psycopg.Connection,
+    source_package_id: str,
+    artifact_sha256: str,
+    artifact_bytes: int,
+    *,
+    batch_size: int,
+    contract_version: str,
+    force_recapture: bool,
+) -> BeginResult:
     if not force_recapture:
         # The current attempt decides. Resuming it before looking for a replay is
         # what lets an intentional recapture of identical bytes finish after an

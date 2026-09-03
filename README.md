@@ -5,11 +5,11 @@
 A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 
 **Status:** the archive inspector, a transactional package loader into
-PostgreSQL, and coverage verification of a loaded capture against the TED Search
-API are implemented. Lint and all 174 tests pass locally and in
-[GitHub CI](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33760400881)
-against real PostgreSQL, without skipped tests. The HTTP package downloader,
-the historical run, benchmarks, and orchestration are still pending.
+PostgreSQL, coverage verification of a loaded capture against the TED Search API,
+and a daily ingest command that acquires a package and checkpoints it only when
+both hold are implemented. Lint and all 250 tests pass locally against real
+PostgreSQL, without skipped tests; the badge above reports the latest CI run on
+`main`. The historical run, benchmarks, and orchestration are still pending.
 
 ## Problem
 
@@ -31,30 +31,35 @@ without double counting overlapping source packages.
 | SQL over published, deduplicated notices | Monthly counts reconcile to all 2,967 loaded notices |
 | Coverage verification against the Search API | A live run matched all 2,967 identifiers of that capture across 13 requests |
 | Explicit coverage state | Verified, mismatch, unavailable and unconfirmed-empty are four different answers, each with its recorded evidence |
+| Bounded, recoverable package download | Truncation, oversized bodies, redirects off-origin, corrupt archives and 404s are all refused; interruptions restart from byte zero |
+| A checkpoint that only a complete flow can seal | Validated artifact plus published capture plus a named verified attempt, re-checked in one transaction and read back |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A["Local TED XML<br/>archive"] --> B["Validate and<br/>project"]
+    A["TED package<br/>over HTTPS"] --> B["Validate and<br/>project"]
     B --> C["PostgreSQL<br/>COPY batches"]
     C --> D["Reconcile<br/>capture"]
     D --> E["Atomic<br/>publication"]
     E --> F["SQL consumption<br/>views"]
     G["TED Search API"] --> H["Verify coverage"]
     E --> H
-    H --> F
+    H --> I["Package<br/>checkpoint"]
+    I --> F
 ```
 
 Python implements archive handling, ingestion and verification. PostgreSQL stores
 notice data and transactional state; Docker Compose provides the local database.
 A restricted reader role sees published notice rows while incomplete replacements
-remain internal. The planned HTTP downloader will fetch packages, and Airflow will
-later coordinate the verified workflow.
+remain internal. The filesystem and the database share no transaction, so the
+ingest run records each durable step and recovers from it; Airflow will later
+coordinate the verified workflow.
 
 See [source and design decisions](docs/design.md),
 [transaction boundaries and recovery](docs/loading.md),
-[coverage verification](docs/verification.md), and
+[coverage verification](docs/verification.md),
+[download, recovery and checkpoint](docs/ingestion.md), and
 [field projection](docs/projection.md).
 
 ## Quick start
@@ -154,6 +159,31 @@ signal ends it. Records, distinct identifiers and the announced total must agree
 See [coverage verification](docs/verification.md) for the states, budgets, retry
 rules and locking, and [`queries/`](queries/README.md) for reporting them.
 
+## Process one package end to end
+
+`load` says the archive loaded; `verify` says the source agrees. Neither makes a
+package processed. This does:
+
+```sh
+python -m tender_ledger ingest --package-id daily/202300220
+```
+
+The URL is derived from the identity and cannot be supplied on the command line.
+The archive is streamed to a temporary file under byte and time budgets,
+validated as a complete gzip-tar package, fsynced and renamed into `data/`, and
+only then referenced in the database. The capture link is written in the same
+transaction that creates the capture, so an interruption before the first batch
+still knows which capture to resume. Exit code 0 means a checkpoint naming the
+artifact checksum, the published capture and the specific verified attempt,
+re-checked in one short transaction and read back after it commits.
+
+Whether that checkpoint still describes the package is derived, not stored: a
+`load --force-recapture` or a later failed check retires it while keeping the
+evidence of what was sealed. Re-running `ingest` with a current checkpoint
+re-validates the stored artifact and replays the existing success without a
+single request. See [ingestion](docs/ingestion.md) for the recovery table,
+budgets and locking.
+
 ## Query the result
 
 The consumption grain is one canonical publication per row, even when daily and
@@ -174,7 +204,10 @@ or procurement spending.
 schema versions, and source overlap. [Coverage status](queries/coverage_status.sql)
 reports every published capture including never-verified ones, and
 [verification history](queries/verification_history.sql) lists each capture's
-attempts in order. [`queries/README.md`](queries/README.md) states each query's
+attempts in order. [Ingest status](queries/ingest_status.sql) separates a package
+that was never checkpointed from one whose checkpoint a later acquisition or a
+later coverage check retired, and [ingest history](queries/ingest_history.sql)
+shows how far each run got. [`queries/README.md`](queries/README.md) states each query's
 grain and how it treats missing values.
 
 ## Verified evidence
@@ -184,7 +217,7 @@ grain and how it treats missing values.
 - A real mixed daily package contained **2,967 distinct notices**: 1,813 legacy and 1,154 eForms. Its complete identifier set matched the API across 12 pages.
 - The inspector processed that package successfully; its checks are covered by automated tests.
 - That same real package (2,967 notices, 1,813 legacy + 1,154 eForms) was loaded into PostgreSQL as an M1 smoke: members, distinct keys, and loaded rows all reconciled at 2,967, a replay was a no-op, and every view reported `source_coverage_verified = false`.
-- The full test suite is **174 tests**, run locally and in CI without skips: archive/projection tests, HTTP and pagination tests against a local test server and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses and unknown counts supporting a verification claim.
+- The full test suite is **250 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against local test servers and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses and unknown counts supporting a verification claim. The ingest tests interrupt the flow at each durable boundary -- including a real termination of a test-only PostgreSQL session during the checkpoint transaction -- resume from another connection, and compare the result with a clean run over the same bytes.
 - **Live verification** against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests, with no duplicates or differences. The check passed on a disposable copy before migration 0003 was applied to development. Verification of the development capture then committed `source_coverage_verified = true`, preserving all notice rows, batches, and the publication pointer. The canonical key digest matched earlier independent comparisons of the same issue.
 - An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
 
@@ -216,21 +249,22 @@ python scripts/run_tests.py
 
 The test runner creates and replaces its dedicated test databases; use a local
 development server or disposable CI service. It does not target the development
-database. The
+database. The most recent
 [GitHub-hosted verification run](https://github.com/alpastorvillar-design/tender-ledger/actions/runs/33760400881)
-passed Ruff and all 174 tests on Ubuntu 24.04, Python 3.14.3, and PostgreSQL 17.11.
+recorded here passed Ruff and 174 tests on Ubuntu 24.04, Python 3.14.3, and
+PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
 
-1. Package download over HTTP with bounded retries and integrity checks, and a coverage
-   checkpoint that stops an automated workflow from treating an unverified
-   window as processed.
+1. Monthly packages and a bounded backfill over selected periods.
 2. A measured rehearsal with at least 100,000 real notices, followed by at least
    one million distinct notices toward the 2020–2025 historical target.
 3. Six SQL workloads with correctness checks, query plans, storage measurements,
    and recovery results; then local Airflow orchestration.
 
-The current real-data validation covers one mixed day, loaded and verified.
+The current real-data validation covers one mixed day, loaded and verified. The
+ingest command processes one named daily package; there is no calendar, no
+backfill and no retention of old artifacts yet.
 Historical completeness, large-dataset performance, and cloud execution have not
 been demonstrated. Coverage has been verified for that single capture; it says
 nothing about any other period.

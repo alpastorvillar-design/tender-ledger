@@ -1,11 +1,13 @@
 # Design and source contract
 
-Status: source inspection, the transactional PostgreSQL loader, and coverage
-verification of one published capture against the Search API are implemented.
+Status: source inspection, the transactional PostgreSQL loader, coverage
+verification of one published capture against the Search API, and the daily
+ingest flow that joins them behind a checkpoint are implemented.
 See [projection.md](projection.md) for the field contract, [loading.md](loading.md)
-for the capture/batch/publish semantics, and [verification.md](verification.md)
-for the coverage contract. This document keeps the source observations and the
-rationale behind those semantics.
+for the capture/batch/publish semantics, [verification.md](verification.md)
+for the coverage contract, and [ingestion.md](ingestion.md) for the download,
+recovery and checkpoint contract. This document keeps the source observations and
+the rationale behind those semantics.
 
 ## Source selection and observed behavior
 
@@ -58,7 +60,7 @@ Capture order describes what this system acquired, not the official publication/
 
 Implemented in [loading.md](loading.md). In summary:
 
-1. Hash the whole archive; a mid-run change or truncation cannot publish as complete. (Resumable download is a later slice; the loader takes a local file.)
+1. Hash the whole archive; a mid-run change or truncation cannot publish as complete. (The loader takes a local file; `ingest` is what acquires one, see [ingestion.md](ingestion.md).)
 2. A capture identity is persisted before any row loads, with source package identity, checksum, and contract version, and survives retries.
 3. Members stream and apply as deterministic batches into capture-scoped rows; batch data and batch status commit together.
 4. Reconcile expected members, distinct keys, and loaded records. `load` never sets `source_coverage_verified`; the separate `verify` command establishes it against the API.
@@ -66,7 +68,7 @@ Implemented in [loading.md](loading.md). In summary:
 
 Readers keep seeing the previous complete capture while a replacement is partial or failed - the pointer swap is the only visibility change. Partial batches are never upserted into an exposed current-state table. `tl_read.distinct_notice` collapses repeated content from overlapping daily/monthly packages so it does not inflate the distinct-publication count.
 
-Raw storage and PostgreSQL do not share a transaction. Preserve recoverable artifacts after failure. Serialize conflicting work initially; do not promise exactly-once provider delivery.
+Raw storage and PostgreSQL do not share a transaction. Preserve recoverable artifacts after failure. Serialize conflicting work initially; do not promise exactly-once provider delivery. [ingestion.md](ingestion.md) states where each boundary is and how it recovers.
 
 Start with an unpartitioned PostgreSQL baseline and a year-aware publication key. Evaluate indexes and annual partitioning against measured plans before the historical run. Any migration must preserve uniqueness and query results.
 
@@ -74,7 +76,7 @@ Start with an unpartitioned PostgreSQL baseline and a year-aware publication key
 
 Retain compressed archives and stream XML members. Do not expand the historical archive to disk. Compare advertised and received lengths where available and compute a local checksum.
 
-Observed endpoints advertise byte ranges but lack ETag/Last-Modified validators. The first downloader restarts incomplete downloads; it does not combine byte ranges from potentially different object versions. Reuse completed verified artifacts on replay.
+Observed endpoints advertise byte ranges but lack ETag/Last-Modified validators. The implemented downloader restarts incomplete downloads from byte zero; it does not combine byte ranges from potentially different object versions. Completed artifacts are re-validated and reused on replay.
 
 The implemented inspector checks gzip CRC and trailer completion, validates supported member types, and applies byte/record limits. Its duplicate-key set is bounded by the configured notice limit; the historical loader will move large-scale uniqueness enforcement to PostgreSQL.
 
