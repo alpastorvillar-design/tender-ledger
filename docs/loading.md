@@ -31,6 +31,12 @@ publish --------------> one transaction: supersede prior capture, swap
                          tl_work.published_capture pointer, status -> 'published'
 ```
 
+Memory over one package is one XML member at a time plus the reconciliation sets:
+one canonical key per row written. That second term is O(notices in the package),
+not O(batch), and it is deliberate — it is what proves a stream reassembled after
+a restart produces the same partition, where the primary key cannot fire for the
+batches a resume skips. It is a term to measure, not one to remove.
+
 ## Connection contract
 
 The loader and the repository own their transaction boundaries, so they require
