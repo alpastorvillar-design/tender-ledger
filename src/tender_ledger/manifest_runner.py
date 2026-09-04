@@ -18,9 +18,14 @@ persisted. There is nothing about "the manifest" for either of those to
 remember.
 """
 
+import contextlib
 import datetime as dt
+import json
+import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import psycopg
 
@@ -216,3 +221,29 @@ def report_to_dict(report: ManifestReport) -> dict:
             for e in report.entries
         ],
     }
+
+
+def write_report_file(path: Path, report: ManifestReport) -> None:
+    """Write the report as JSON to ``path``, replacing it atomically.
+
+    ``path``'s parent directory must already exist: nothing here creates one
+    the caller did not, so a typo in ``--report`` fails loudly instead of
+    quietly making a new directory. The temporary file is exclusive to this
+    call and lives beside the destination, so the final rename stays on one
+    filesystem; it is removed if anything goes wrong before the rename.
+    """
+    path = Path(path)
+    payload = json.dumps(report_to_dict(report), indent=2)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".manifest-report-", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_name)
+        raise

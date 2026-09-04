@@ -306,7 +306,9 @@ views and nothing else.
 
 ## Deliberately not done here
 
-More than one package per invocation, a publication calendar, backfill,
-retention of old artifacts, the 100,000-notice rehearsal, the million-notice
-gate, the measured SQL workload, and Airflow. `ingest` processes one named
-package and says whether that package is processed.
+More than one package per invocation, a publication calendar, retention of old
+artifacts, the 100,000-notice rehearsal, the million-notice gate, the measured
+SQL workload, and Airflow. `ingest` processes one named package and says
+whether that package is processed. [`ingest-manifest`](backfill.md) composes
+this same command over a fixed, ordered list of packages -- it adds no second
+recovery mechanism, only sequencing and a report.

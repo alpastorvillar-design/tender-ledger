@@ -98,6 +98,26 @@ def _build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show capture status")
     status.add_argument("--package-id", help="restrict to one source package")
 
+    ingest_manifest = commands.add_parser(
+        "ingest-manifest",
+        help="ingest every package a versioned manifest names, in order",
+    )
+    ingest_manifest.add_argument("--manifest", type=Path, required=True)
+    ingest_manifest.add_argument(
+        "--report", type=Path,
+        help="write the JSON report to this file (atomic replace) instead of"
+             " stdout; its parent directory must already exist",
+    )
+    ingest_manifest.add_argument(
+        "--data-dir", type=Path,
+        help="directory holding downloaded archives (default: ./data, ignored by Git)",
+    )
+    ingest_manifest.add_argument("--batch-size", type=int, default=500)
+    ingest_manifest.add_argument(
+        "--lock-wait", action="store_true",
+        help="wait for concurrent work on a package instead of failing fast",
+    )
+
     return parser
 
 
@@ -269,6 +289,45 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ingest_manifest(args: argparse.Namespace) -> int:
+    from . import db
+    from .manifest import ManifestError, load_manifest
+    from .manifest_runner import report_to_dict, run_manifest, write_report_file
+
+    try:
+        manifest = load_manifest(args.manifest)
+    except ManifestError as exc:
+        print(f"Manifest rejected: {exc}", file=sys.stderr)
+        return 1
+
+    def ingest_options(_entry):
+        return {
+            "data_root": args.data_dir,
+            "batch_size": args.batch_size,
+            "lock_wait": args.lock_wait,
+        }
+
+    report = run_manifest(
+        manifest, connect_factory=db.connect,
+        ingest_options=ingest_options, manifest_path=str(args.manifest),
+    )
+    if args.report is not None:
+        try:
+            write_report_file(args.report, report)
+        except OSError as exc:
+            print(f"Failed to write the report to {args.report}: {exc}", file=sys.stderr)
+            return 1
+    else:
+        print(json.dumps(report_to_dict(report), indent=2))
+    if report.status != "completed":
+        print(
+            f"manifest {args.manifest} stopped at {report.failed_entry!r}: not every"
+            " package is processed", file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main() -> int:
     args = _build_parser().parse_args()
     try:
@@ -284,6 +343,8 @@ def main() -> int:
             return _cmd_verify(args)
         if args.command == "status":
             return _cmd_status(args)
+        if args.command == "ingest-manifest":
+            return _cmd_ingest_manifest(args)
     except Exception as exc:  # surface a clean message, not a traceback
         print(f"{args.command} failed: {exc}", file=sys.stderr)
         return 1

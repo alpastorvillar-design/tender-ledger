@@ -208,5 +208,8 @@ each capture's attempts in order with the state that preceded them.
 with `source_coverage_verified = false`; running `verify` by hand does not mark
 a package processed either. What does is the checkpoint `ingest` seals, which
 also requires an artifact this system acquired and validated - see
-[ingestion.md](ingestion.md). Monthly packages, the publication calendar,
-backfill, Airflow, and the measured SQL workload are all later slices.
+[ingestion.md](ingestion.md). The publication calendar, Airflow, and the
+measured SQL workload are all later slices; monthly packages and a sequential
+runner over an explicit package list exist -- see
+[package_contract.py](../src/tender_ledger/package_contract.py) and
+[backfill.md](backfill.md).

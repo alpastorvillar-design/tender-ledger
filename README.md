@@ -12,10 +12,13 @@ contract (v2) preserves official eForms change references as an ordered
 one-to-many relation, a checkpoint sealed under an older contract is never
 replayed, and six analytical SQL workloads answer grain, coverage-calendar,
 cutoff-state and cross-package-overlap questions with correctness fixtures.
-Lint and the full test suite pass locally against real PostgreSQL, without
-skipped tests; the badge above reports the latest CI run on `main`. Only a
-daily package has been acquired from TED so far, under contract v1. The
-historical run, SQL benchmarks, and orchestration are still pending.
+A versioned manifest format and a sequential runner compose `ingest` over an
+explicit, ordered list of packages, stopping at the first one that is not
+processed, with no manifest-level table or transaction of its own. Lint and
+the full test suite pass locally against real PostgreSQL, without skipped
+tests; the badge above reports the latest CI run on `main`. Only a daily
+package has been acquired from TED so far, under contract v1. The historical
+run, SQL benchmarks, and orchestration are still pending.
 
 ## Problem
 
@@ -44,6 +47,7 @@ without double counting overlapping source packages.
 | Official change references as a relation, not a column | Every `efbc:ChangedNoticeIdentifier`, kept ordered and atomic with its notice; a real archive showed this is genuinely one-to-many |
 | A replay that checks its own contract version | A checkpoint sealed under an older projection contract is never replayed as processed, only reprojected under the current one |
 | Six analytical SQL workloads with correctness fixtures | Latest-capture ranking, change-reference resolution, acquisition cutoffs, a coverage calendar, and cross-package overlap auditing |
+| A versioned manifest and sequential backfill runner | Strict schema validation before any network or database use; a run over five packages stops at the first that is not processed and a second run replays or resumes exactly where it left off |
 
 ## Architecture
 
@@ -70,8 +74,9 @@ coordinate the verified workflow.
 See [source and design decisions](docs/design.md),
 [transaction boundaries and recovery](docs/loading.md),
 [coverage verification](docs/verification.md),
-[download, recovery and checkpoint](docs/ingestion.md), and
-[field projection](docs/projection.md).
+[download, recovery and checkpoint](docs/ingestion.md),
+[field projection](docs/projection.md), and
+[the manifest format and sequential backfill runner](docs/backfill.md).
 
 ## Quick start
 
@@ -210,6 +215,23 @@ re-validates the stored artifact and replays the existing success without a
 single request. See [ingestion](docs/ingestion.md) for the recovery table,
 budgets and locking.
 
+## Run a manifest of packages
+
+```sh
+python -m tender_ledger ingest-manifest --manifest manifests/m3-pilot.json
+```
+
+`ingest-manifest` calls `ingest` once per package a versioned manifest names,
+in order, one PostgreSQL connection at a time, and stops at the first package
+that is not processed -- the packages after that point are never attempted. It
+adds no manifest-level table or transaction: a second run over the same
+manifest replays every package whose checkpoint is still current and resumes
+whichever one was interrupted, using exactly the recovery `ingest` already
+has. [`manifests/m3-pilot.json`](manifests/m3-pilot.json) names the five real
+identities planned for the M3d rehearsal; listing them is not evidence any of
+them has been downloaded. See [manifest format and backfill](docs/backfill.md)
+for the schema, the report shape and what is deliberately not here yet.
+
 ## Query the result
 
 The consumption grain is one canonical publication per row, even when daily and
@@ -293,18 +315,19 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
 
-1. A bounded backfill over an explicit list of packages.
-2. A measured rehearsal with at least 100,000 real notices, followed by at least
+1. A measured rehearsal with at least 100,000 real notices, followed by at least
    one million distinct notices toward the 2020–2025 historical target.
-3. Query plans, storage measurements and recovery results for the six SQL
+2. Query plans, storage measurements and recovery results for the six SQL
    workloads (correctness-checked now, against synthetic fixtures) on the
    rehearsal dataset; then local Airflow orchestration.
 
 The current real-data validation covers one mixed day, loaded and verified. No
 monthly package has been downloaded from TED: monthly identities, policies and
-membership rules are covered by fixtures and local servers only. The ingest
-command processes one named package; there is no calendar, no backfill and no
-retention of old artifacts yet.
+membership rules are covered by fixtures and local servers only. The manifest
+and sequential runner over an explicit, ordered list of packages are
+implemented and tested against fixtures; `manifests/m3-pilot.json` has not
+been run against real TED packages. There is no publication calendar, no
+retention of old artifacts, and no parallelism yet.
 Historical completeness, large-dataset performance, and cloud execution have not
 been demonstrated. Coverage has been verified for that single capture; it says
 nothing about any other period.
