@@ -50,6 +50,7 @@ from .download import (
 from .loader import load_package
 from .package_contract import policy_for
 from .packages import Limits, limits_from
+from .projection import CONTRACT_VERSION
 from .source_api import Budgets, Clock, Transport
 from .source_api import budgets_from as api_budgets_from
 from .verification import VERIFIED, verify_capture
@@ -223,9 +224,21 @@ def _replay(
     package, or whose artifact is gone or no longer hashes to what was recorded,
     falls through to a fresh run. A row on its own is never enough to report a
     package processed.
+
+    A checkpoint sealed under an older projection contract is declined the same
+    way, even when it is otherwise internally consistent (its capture, artifact
+    checksum and attempt all still agree with each other): the database has no
+    way to know today's ``CONTRACT_VERSION``, so this comparison is made here,
+    once, against the constant this running code actually uses -- not
+    duplicated as a literal in SQL, where it could drift out of sync with
+    Python. Declining falls through to a fresh run, which acquires a new
+    capture under the current contract and reprojects it; it does not resume
+    or overwrite the old, still-valid v1 evidence.
     """
     status = _status(conn, source_package_id)
     if status is None or not status["checkpoint_is_current"]:
+        return None
+    if status["checkpoint_contract_version"] != CONTRACT_VERSION:
         return None
     artifact = validate_artifact(
         destination, expected_sha256=status["checkpoint_artifact_sha256"], limits=limits
