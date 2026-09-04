@@ -1,6 +1,20 @@
--- Monthly distinct-notice counts by buyer country and primary CPV division.
+-- Workload 1: monthly notice counts by buyer country and primary CPV division.
 --
+-- Question: how many distinct notices were published per month, buyer country
+-- and CPV division?
 -- Grain: one row per (publication month, buyer country, CPV division).
+-- Source and filters: tl_read.distinct_notice, unfiltered.
+-- NULL/absent semantics: a notice with no buyer country, or no primary CPV, is
+-- counted under an explicit '(absent)' label. Missing values are never
+-- dropped, never merged into a real code, and never treated as zero.
+-- Order / tie-break: publication_month, buyer_country, cpv_division ascending;
+-- the grouping columns already make each row unique.
+-- Parameters: none.
+-- Does not let you claim: award amounts, supplier counts, or a lot-level
+-- breakdown -- the projection carries none of those. A publication that
+-- appears in both a daily and a monthly package is counted once here (the
+-- source view resolves overlap), which this file does not itself prove; see
+-- workload 6 for that proof.
 --
 --   * Source is tl_read.distinct_notice, so a publication that appears in both a
 --     daily and a monthly package is counted once, not twice.

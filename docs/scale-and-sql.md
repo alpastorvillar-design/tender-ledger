@@ -1,8 +1,10 @@
 # Scale and SQL requirements
 
-Status: acceptance plan for the historical workload. Archive inspection and
-transactional PostgreSQL loading are implemented, with a verified daily load of
-2,967 real notices. The 100,000-notice rehearsal, minimum million-notice gate,
+Status: acceptance plan for the historical workload. Archive inspection,
+transactional PostgreSQL loading, the projection v2 contract (official change
+references) and the six analytical workloads below are implemented on
+synthetic fixtures, with a verified daily load of 2,967 real notices under
+contract v1. The 100,000-notice rehearsal, minimum million-notice gate,
 historical coverage, and SQL benchmarks remain pending.
 
 ## Dataset and completion gates
@@ -38,14 +40,16 @@ Large runs are explicit local operations, separate from routine CI. Raw datasets
 
 ## SQL workload
 
-The data model must support a documented notice grain, observed changes, source provenance, and complete-window status. Implement at least six useful queries, each with a correctness fixture and an explanation of its grain:
+The data model must support a documented notice grain, observed changes, source provenance, and complete-window status. Six workloads are implemented in [`queries/`](../queries/README.md), each with a correctness fixture in `tests/test_queries.py` and a header documenting its question, grain, source, null semantics, ordering, parameters and what it does not let you claim:
 
-1. Monthly notice counts by country and primary CPV, with explicit treatment of missing values and multi-valued classifications.
-2. Latest completed capture per publication, with deterministic capture ordering. Grouping by procedure answers a different question.
-3. Supported official change references and observed content differences, with explicit format coverage and unresolved targets; use window functions where their ordering has a valid meaning.
-4. The dataset as captured by this system at an acquisition-time cutoff, without presenting backfill ingestion dates as official historical versions.
-5. Coverage and ingestion freshness over a calendar axis with LEFT JOIN, distinguishing empty source periods, missing captures, and unavailable verification.
-6. Duplicate source records and reconciliation discrepancies using NOT EXISTS or EXCEPT over publication keys.
+1. [`monthly_notice_counts.sql`](../queries/monthly_notice_counts.sql) — monthly notice counts by country and primary CPV, with explicit treatment of missing values and multi-valued classifications.
+2. [`latest_capture_per_publication.sql`](../queries/latest_capture_per_publication.sql) — latest completed capture per publication, with deterministic capture ordering (`ROW_NUMBER` over `acquisition_ordinal desc, capture_id desc`). Grouping by procedure would answer a different question.
+3. [`official_change_references.sql`](../queries/official_change_references.sql) — supported official change references (contract v2, `efbc:ChangedNoticeIdentifier`) and their resolution against loaded identities, with explicit format coverage and unresolved targets.
+4. [`acquisition_cutoff_state.sql`](../queries/acquisition_cutoff_state.sql) — the dataset as captured by this system at an acquisition-time cutoff, without presenting backfill ingestion order as official historical versions.
+5. [`monthly_coverage_calendar.sql`](../queries/monthly_coverage_calendar.sql) — coverage and ingestion freshness over a calendar axis with `LEFT JOIN`, distinguishing empty source periods, missing captures, retired checkpoints and unavailable verification.
+6. [`cross_package_overlap_audit.sql`](../queries/cross_package_overlap_audit.sql) — cross-package identity overlap and content discrepancies using `NOT EXISTS` (both directions, so neither package is assumed to be the other's subset) and `EXCEPT` (whole-row comparison) over publication keys.
+
+These six are implemented and fixture-tested now, against small synthetic datasets built for correctness and adversarial cases (duplicates, absent fields, unresolved references, retired checkpoints) — not against the real historical dataset, and not yet measured for performance. `EXPLAIN (ANALYZE, BUFFERS)`, repeated timings, and equality of results before/after optimizing are M3d's job, once a real multi-package dataset exists to measure against; see "Measurement and recovery" below.
 
 Extend buyer-level analysis only after verifying organization identifiers and join cardinality. Do not infer awards, expenditure, or supplier outcomes from notices that do not contain those facts.
 

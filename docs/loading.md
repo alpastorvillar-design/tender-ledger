@@ -232,8 +232,10 @@ filesystem paths are never reported.
 ## Deliberately deferred
 
 Annual partitioning (the baseline keeps year in the natural key so a partitioned
-table can be proven equivalent later), indexes tuned against measured plans, the
-six-query workload and its benchmark, backfill over several packages, and
-Airflow.
+table can be proven equivalent later), indexes tuned against measured plans,
+backfill over several packages, and Airflow.
 The HTTP downloader and the coverage checkpoint now exist; see
-[ingestion.md](ingestion.md).
+[ingestion.md](ingestion.md). The six analytical workloads now exist too, with
+correctness fixtures against synthetic data; see
+[`queries/`](../queries/README.md) and [scale-and-sql.md](scale-and-sql.md) --
+their measured benchmark against a real dataset is still pending.

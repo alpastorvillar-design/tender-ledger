@@ -7,11 +7,15 @@ A recoverable pipeline for public procurement notices and PostgreSQL analytics.
 **Status:** the archive inspector, a transactional package loader into
 PostgreSQL, coverage verification of a loaded capture against the TED Search API,
 and an ingest command that acquires one package and checkpoints it only when both
-hold are implemented, for daily and monthly package identities. Lint and the full
-test suite pass locally against real PostgreSQL, without skipped tests; the badge
-above reports the latest CI run on `main`. Only a daily package has been acquired
-from TED so far. The historical run, benchmarks, and orchestration are still
-pending.
+hold are implemented, for daily and monthly package identities. The projection
+contract (v2) preserves official eForms change references as an ordered
+one-to-many relation, a checkpoint sealed under an older contract is never
+replayed, and six analytical SQL workloads answer grain, coverage-calendar,
+cutoff-state and cross-package-overlap questions with correctness fixtures.
+Lint and the full test suite pass locally against real PostgreSQL, without
+skipped tests; the badge above reports the latest CI run on `main`. Only a
+daily package has been acquired from TED so far, under contract v1. The
+historical run, SQL benchmarks, and orchestration are still pending.
 
 ## Problem
 
@@ -37,6 +41,9 @@ without double counting overlapping source packages.
 | A checkpoint that only a complete flow can seal | Validated artifact plus published capture plus a named verified attempt, re-checked in one transaction and read back |
 | One resource policy per package kind | Archive, download and Search API limits are derived from the package identity, with their coherence asserted at construction |
 | A compatibility survey before a load | The same walker inventories formats, schema versions, roots and rejection reasons instead of stopping at the first one |
+| Official change references as a relation, not a column | Every `efbc:ChangedNoticeIdentifier`, kept ordered and atomic with its notice; a real archive showed this is genuinely one-to-many |
+| A replay that checks its own contract version | A checkpoint sealed under an older projection contract is never replayed as processed, only reprojected under the current one |
+| Six analytical SQL workloads with correctness fixtures | Latest-capture ranking, change-reference resolution, acquisition cutoffs, a coverage calendar, and cross-package overlap auditing |
 
 ## Architecture
 
@@ -229,6 +236,16 @@ later coverage check retired, and [ingest history](queries/ingest_history.sql)
 shows how far each run got. [`queries/README.md`](queries/README.md) states each query's
 grain and how it treats missing values.
 
+Six analytical workloads answer specific SQL-portfolio questions, each with a
+correctness fixture: the [latest complete capture per package](queries/latest_capture_per_publication.sql),
+[official change references and their resolution](queries/official_change_references.sql),
+[state at an acquisition cutoff](queries/acquisition_cutoff_state.sql), a
+[monthly coverage calendar](queries/monthly_coverage_calendar.sql), and a
+[cross-package overlap audit](queries/cross_package_overlap_audit.sql) using
+`NOT EXISTS` and `EXCEPT`. They are tested against synthetic fixtures, not yet
+measured against the real historical dataset; see
+[scale-and-sql.md](docs/scale-and-sql.md).
+
 ## Verified evidence
 
 - Six annual API counts sum to **4,523,626 reported results** for 2020–2025. These are not loaded database rows.
@@ -236,7 +253,7 @@ grain and how it treats missing values.
 - A real mixed daily package contained **2,967 distinct notices**: 1,813 legacy and 1,154 eForms. Its complete identifier set matched the API across 12 pages.
 - The inspector processed that package successfully; its checks are covered by automated tests.
 - That same real package (2,967 notices, 1,813 legacy + 1,154 eForms) was loaded into PostgreSQL as an M1 smoke: members, distinct keys, and loaded rows all reconciled at 2,967, a replay was a no-op, and every view reported `source_coverage_verified = false`.
-- The full test suite is **336 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against local test servers and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses, stale or internally inconsistent checkpoints, unbalanced nested locks, and unknown counts supporting a verification claim. The ingest tests interrupt the flow at each durable boundary -- including a real termination of a test-only PostgreSQL session during the checkpoint transaction -- resume from another connection, and compare the result with a clean run over the same bytes. Package-identity tests cover the derived URL, destination, interval and query for both kinds, the resource-policy invariants, and which policy each of `inspect`, `load`, `verify` and `ingest` selects; membership tests cover both edges of a month, a leap February, dates outside it, and a local capture whose rows do not belong to the month it names; survey tests cover an inventory of formats, roots and rejection reasons against archives that a load refuses outright.
+- The full test suite is **374 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against local test servers and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses, stale or internally inconsistent checkpoints, unbalanced nested locks, and unknown counts supporting a verification claim. The ingest tests interrupt the flow at each durable boundary -- including a real termination of a test-only PostgreSQL session during the checkpoint transaction -- resume from another connection, and compare the result with a clean run over the same bytes. Package-identity tests cover the derived URL, destination, interval and query for both kinds, the resource-policy invariants, and which policy each of `inspect`, `load`, `verify` and `ingest` selects; membership tests cover both edges of a month, a leap February, dates outside it, and a local capture whose rows do not belong to the month it names; survey tests cover an inventory of formats, roots and rejection reasons against archives that a load refuses outright. Contract v2 tests cover ordered change-reference projection, atomic persistence with an independently checked reference count, cancellation and recovery producing the same reference rows as a clean run, a checkpoint sealed under an older contract never replaying, and the six analytical workloads against synthetic fixtures.
 - **Live verification** against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests, with no duplicates or differences. The check passed on a disposable copy before migration 0003 was applied to development. Verification of the development capture then committed `source_coverage_verified = true`, preserving all notice rows, batches, and the publication pointer. The canonical key digest matched earlier independent comparisons of the same issue.
 - A **bounded live ingest** of that same package on 2026-09-03 downloaded 12,377,691 bytes in one HTTP attempt (sha256 `f9ef1ffdcc78060fa7025f77f2eaf0b0808c0e0bc8c8dccb0722db3867a1f2a2`), validated and loaded 2,967 notices (1,813 legacy, 1,154 eForms), matched all 2,967 identifiers across 13 API requests with no duplicates or differences, and sealed a checkpoint: 10.4 s end to end. Re-running the command replayed the stored evidence with no request of any kind. It ran against a disposable database and a private temporary directory; the key digest matched the earlier independent comparison of the same issue.
 - An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
@@ -279,8 +296,9 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
 1. A bounded backfill over an explicit list of packages.
 2. A measured rehearsal with at least 100,000 real notices, followed by at least
    one million distinct notices toward the 2020–2025 historical target.
-3. Six SQL workloads with correctness checks, query plans, storage measurements,
-   and recovery results; then local Airflow orchestration.
+3. Query plans, storage measurements and recovery results for the six SQL
+   workloads (correctness-checked now, against synthetic fixtures) on the
+   rehearsal dataset; then local Airflow orchestration.
 
 The current real-data validation covers one mixed day, loaded and verified. No
 monthly package has been downloaded from TED: monthly identities, policies and

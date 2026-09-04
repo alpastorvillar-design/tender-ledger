@@ -1,16 +1,59 @@
 # Queries
 
-SQL over the published consumption views. Every file states its grain and how it
-treats missing values, because most of the wrong answers available here come from
-one of those two things rather than from the join.
+SQL over the published consumption views. Every file states its question, grain,
+source, null semantics, ordering, parameters and what it does not let you claim,
+because most of the wrong answers available here come from one of those things
+rather than from the join.
 
 Everything counts **notices** — published procurement announcements. It does not
 count awards, contracts, lots, suppliers or money. The current projection does
 not extract monetary amounts from notices.
 
+## The six analytical workloads
+
+Each has a correctness fixture in `tests/test_queries.py` and answers exactly the
+question its header states — nothing here has been measured for performance yet
+(query plans, indexes and partitioning are a later milestone; see
+[scale-and-sql.md](../docs/scale-and-sql.md)).
+
+| # | File | Question | Grain |
+| --- | --- | --- | --- |
+| 1 | [monthly_notice_counts.sql](monthly_notice_counts.sql) | How many distinct notices were published per month, buyer country and CPV division? | One row per (month, country, CPV division) |
+| 2 | [latest_capture_per_publication.sql](latest_capture_per_publication.sql) | For each source package, which is its most recently acquired complete capture? | One row per source package |
+| 3 | [official_change_references.sql](official_change_references.sql) | Which notices declare official change references, and which resolve to a loaded notice? | One row per (notice, change reference); a notice with none still gets one row |
+| 4 | [acquisition_cutoff_state.sql](acquisition_cutoff_state.sql) | What did this system hold for each package at a given point in its own acquisition order? | One row per source package with a complete capture at or before the cutoff |
+| 5 | [monthly_coverage_calendar.sql](monthly_coverage_calendar.sql) | Over a calendar range, has each monthly package been touched, and with what standing? | One row per calendar month in the range |
+| 6 | [cross_package_overlap_audit.sql](cross_package_overlap_audit.sql) | Between two packages, which identities are exclusive to one, and do the shared ones actually agree? | One row per finding (only-in-A, only-in-B, or content differs) |
+
+### Parameters
+
+Workloads 4, 5 and 6 take parameters, written as `:'name'` tokens (psql's own
+quoted-variable syntax):
+
+| File | Parameters |
+| --- | --- |
+| `acquisition_cutoff_state.sql` | `:'cutoff'` — an `acquisition_ordinal` value |
+| `monthly_coverage_calendar.sql` | `:'first_month'`, `:'last_month'` — first-of-month dates, inclusive |
+| `cross_package_overlap_audit.sql` | `:'package_a'`, `:'package_b'` — two `source_package_id` values |
+
+From psql, set them with `-v`:
+
+```powershell
+Get-Content -Raw .\queries\acquisition_cutoff_state.sql |
+    docker compose exec -T postgres psql -U postgres -d tender_ledger `
+        -v ON_ERROR_STOP=1 -v cutoff=5 -f -
+```
+
+From Python, as `tests/test_queries.py` does: replace the literal token with a
+quoted value before executing, e.g. `sql.replace(":'cutoff'", "5")` or
+`sql.replace(":'first_month'", "'2020-01-01'")`. Nothing in the query engine
+parses `:'name'` itself; it is plain text that both psql and this substitution
+convention treat the same way.
+
+## Operational diagnostics
+
 | File | Question | Grain |
 | --- | --- | --- |
-| [monthly_notice_counts.sql](monthly_notice_counts.sql) | How many distinct notices were published per month, buyer country and CPV division? | One row per (month, country, CPV division) |
 | [coverage_status.sql](coverage_status.sql) | For each published capture, does the source agree we hold the whole issue? | One row per published capture |
 | [verification_history.sql](verification_history.sql) | What has each capture's coverage check said over time? | One row per verification attempt |
 | [diagnostics.sql](diagnostics.sql) | Load reconciliation, cross-package overlap, field completeness | Stated per query; run them individually |
@@ -18,6 +61,9 @@ not extract monetary amounts from notices.
 | [ingest_history.sql](ingest_history.sql) | What did each ingest run do, and how far did it get? | One row per ingest run |
 
 `diagnostics.sql` holds several independent queries. Run them one at a time.
+These predate the six-workload set above and remain useful for day-to-day
+operational questions; they are not a substitute for the six workloads and are
+not counted as such.
 
 ## Missing values
 
