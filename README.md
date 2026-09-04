@@ -264,8 +264,10 @@ correctness fixture: the [latest complete observation per publication](queries/l
 [state at an acquisition cutoff](queries/acquisition_cutoff_state.sql), a
 [monthly coverage calendar](queries/monthly_coverage_calendar.sql), and a
 [cross-package overlap audit](queries/cross_package_overlap_audit.sql) using
-`NOT EXISTS` and `EXCEPT`. They are tested against synthetic fixtures, not yet
-measured against the real historical dataset; see
+`NOT EXISTS` and `EXCEPT`. They are tested against synthetic fixtures and now
+measured once against 53,489 real notices from a rehearsal that hit a
+structural blocker before reaching the required scale; see
+[measured-rehearsal.md](docs/measured-rehearsal.md) and
 [scale-and-sql.md](docs/scale-and-sql.md).
 
 ## Verified evidence
@@ -279,10 +281,11 @@ measured against the real historical dataset; see
 - **Live verification** against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests, with no duplicates or differences. The check passed on a disposable copy before migration 0003 was applied to development. Verification of the development capture then committed `source_coverage_verified = true`, preserving all notice rows, batches, and the publication pointer. The canonical key digest matched earlier independent comparisons of the same issue.
 - A **bounded live ingest** of that same package on 2026-09-03 downloaded 12,377,691 bytes in one HTTP attempt (sha256 `f9ef1ffdcc78060fa7025f77f2eaf0b0808c0e0bc8c8dccb0722db3867a1f2a2`), validated and loaded 2,967 notices (1,813 legacy, 1,154 eForms), matched all 2,967 identifiers across 13 API requests with no duplicates or differences, and sealed a checkpoint: 10.4 s end to end. Re-running the command replayed the stored evidence with no request of any kind. It ran against a disposable database and a private temporary directory; the key digest matched the earlier independent comparison of the same issue.
 - An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
+- A **measured rehearsal** on 2026-09-04 against five real package identities found that three are not loadable by the current code (two nested-archive monthly packages, one with an unrecognized eForms notice subtype) and loaded the other two: `monthly/2020-02` (50,522 notices) and the same daily package. A real backend termination after 10 committed batches left no false checkpoint; a resume skipped those batches and completed the remaining 92; a third run made zero HTTP requests. The six workloads ran with 20 timed repetitions and matching checksums before and after a candidate index, against 53,489 real notices -- below the 100,000/1,000,000-notice gates. See [measured-rehearsal.md](docs/measured-rehearsal.md).
 
-Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03. No cloud deployment or historical performance benchmark has run.
+Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03; the measured rehearsal on 2026-09-04. No cloud deployment or historical performance benchmark at the required scale has run.
 
-See [design and source contract](docs/design.md), [projection contract](docs/projection.md), [transactional loading](docs/loading.md), and [scale and SQL requirements](docs/scale-and-sql.md).
+See [design and source contract](docs/design.md), [projection contract](docs/projection.md), [transactional loading](docs/loading.md), [scale and SQL requirements](docs/scale-and-sql.md), and the [measured rehearsal](docs/measured-rehearsal.md).
 
 ## Local database setup
 
@@ -320,13 +323,16 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
    workloads (correctness-checked now, against synthetic fixtures) on the
    rehearsal dataset; then local Airflow orchestration.
 
-The current real-data validation covers one mixed day, loaded and verified. No
-monthly package has been downloaded from TED: monthly identities, policies and
-membership rules are covered by fixtures and local servers only. The manifest
-and sequential runner over an explicit, ordered list of packages are
-implemented and tested against fixtures; `manifests/m3-pilot.json` has not
-been run against real TED packages. There is no publication calendar, no
-retention of old artifacts, and no parallelism yet.
+The current real-data validation covers one mixed day and one real monthly
+package (`monthly/2020-02`, 50,522 notices), both loaded, verified and
+checkpointed, including a real mid-load interruption, resume, and full
+replay; see [measured-rehearsal.md](docs/measured-rehearsal.md). Three of the
+five identities in `manifests/m3-pilot.json` are not loadable by the current
+code: two use a nested per-day archive shape the walker does not recurse
+into, and one contains an eForms notice subtype outside the recognized root
+allow-list. `ingest-manifest` against that manifest stops, correctly, at the
+first of those. There is no publication calendar, no retention of old
+artifacts, and no parallelism yet.
 Historical completeness, large-dataset performance, and cloud execution have not
 been demonstrated. Coverage has been verified for that single capture; it says
 nothing about any other period.

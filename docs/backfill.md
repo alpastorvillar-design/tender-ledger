@@ -1,12 +1,13 @@
 # Manifest and sequential backfill
 
 Status: a versioned manifest format and a sequential runner over `ingest`
-exist and are tested against fixtures and a local server. No manifest has been
-run against real TED packages: `manifests/m3-pilot.json` names five real
-identities for the planned rehearsal, but listing them is not evidence they
-were ever downloaded, loaded or verified. That evidence, if it exists, is in
-`tl_read.package_ingest_status` and in a report this command wrote, not in the
-manifest file.
+exist and are tested against fixtures and a local server. `manifests/m3-pilot.json`
+names five real identities; running it for real stopped at the first one,
+`monthly/2020-01`, which is not loadable by the current code -- see
+[measured-rehearsal.md](measured-rehearsal.md). Listing an identity in the
+manifest is not evidence it was downloaded, loaded or verified. That
+evidence, if it exists, is in `tl_read.package_ingest_status` and in a report
+this command wrote, not in the manifest file.
 
 ```sh
 python -m tender_ledger ingest-manifest --manifest manifests/m3-pilot.json
