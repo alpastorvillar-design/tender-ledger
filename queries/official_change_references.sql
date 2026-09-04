@@ -14,11 +14,10 @@
 -- (references follow below), 'absent' (an eForms notice published none),
 -- 'not_applicable' (a legacy notice; the element does not exist for that
 -- schema family) and NULL (loaded before contract v2 -- "not projected under
--- this contract", never the same claim as 'absent'). Among rows that do carry
--- a reference, target_loaded is NULL only when there is no reference at all;
--- it is false, not NULL, for a resolvable-shaped reference whose target was
--- never loaded, because that is a known answer ("not in this database"), not
--- an unknown one.
+-- this contract", never the same claim as 'absent'). target_loaded is NULL
+-- when there is no reference or its shape cannot be mapped safely to a
+-- publication identity. It is false for a publication-shaped reference whose
+-- target is not loaded, because that is a known answer rather than an unknown.
 -- Order / tie-break: source_package_id, publication_year, publication_number,
 -- ordinal -- ordinal is the reference's own stable document-order position, so
 -- no further tie-break is needed within one notice.
@@ -47,6 +46,7 @@ select
     target.publication_ref as resolved_target,
     case
         when r.value is null then null
+        when r.value !~ '^[0-9]{1,8}-[1-9][0-9]{3}$' then null
         else target.publication_ref is not null
     end as target_loaded
 from tl_read.notice_history h

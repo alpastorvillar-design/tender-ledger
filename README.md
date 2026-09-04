@@ -237,7 +237,7 @@ shows how far each run got. [`queries/README.md`](queries/README.md) states each
 grain and how it treats missing values.
 
 Six analytical workloads answer specific SQL-portfolio questions, each with a
-correctness fixture: the [latest complete capture per package](queries/latest_capture_per_publication.sql),
+correctness fixture: the [latest complete observation per publication](queries/latest_capture_per_publication.sql),
 [official change references and their resolution](queries/official_change_references.sql),
 [state at an acquisition cutoff](queries/acquisition_cutoff_state.sql), a
 [monthly coverage calendar](queries/monthly_coverage_calendar.sql), and a

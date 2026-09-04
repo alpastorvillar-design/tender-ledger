@@ -53,6 +53,7 @@ create view tl_read.notice_history as
         c.capture_id,
         c.acquisition_ordinal,
         c.status                                          as capture_status,
+        c.contract_version,
         n.publication_number || '-' || n.publication_year as publication_ref,
         n.publication_year,
         n.publication_number,

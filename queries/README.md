@@ -19,9 +19,9 @@ question its header states — nothing here has been measured for performance ye
 | # | File | Question | Grain |
 | --- | --- | --- | --- |
 | 1 | [monthly_notice_counts.sql](monthly_notice_counts.sql) | How many distinct notices were published per month, buyer country and CPV division? | One row per (month, country, CPV division) |
-| 2 | [latest_capture_per_publication.sql](latest_capture_per_publication.sql) | For each source package, which is its most recently acquired complete capture? | One row per source package |
+| 2 | [latest_capture_per_publication.sql](latest_capture_per_publication.sql) | For each canonical publication, which complete capture observed it most recently? | One row per publication identity |
 | 3 | [official_change_references.sql](official_change_references.sql) | Which notices declare official change references, and which resolve to a loaded notice? | One row per (notice, change reference); a notice with none still gets one row |
-| 4 | [acquisition_cutoff_state.sql](acquisition_cutoff_state.sql) | What did this system hold for each package at a given point in its own acquisition order? | One row per source package with a complete capture at or before the cutoff |
+| 4 | [acquisition_cutoff_state.sql](acquisition_cutoff_state.sql) | What was the latest complete observation of each publication at a point in this system's acquisition order? | One row per publication identity observed by the cutoff |
 | 5 | [monthly_coverage_calendar.sql](monthly_coverage_calendar.sql) | Over a calendar range, has each monthly package been touched, and with what standing? | One row per calendar month in the range |
 | 6 | [cross_package_overlap_audit.sql](cross_package_overlap_audit.sql) | Between two packages, which identities are exclusive to one, and do the shared ones actually agree? | One row per finding (only-in-A, only-in-B, or content differs) |
 

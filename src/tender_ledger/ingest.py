@@ -238,7 +238,10 @@ def _replay(
     status = _status(conn, source_package_id)
     if status is None or not status["checkpoint_is_current"]:
         return None
-    if status["checkpoint_contract_version"] != CONTRACT_VERSION:
+    if (
+        status["checkpoint_contract_version"] != CONTRACT_VERSION
+        or status["published_contract_version"] != CONTRACT_VERSION
+    ):
         return None
     artifact = validate_artifact(
         destination, expected_sha256=status["checkpoint_artifact_sha256"], limits=limits

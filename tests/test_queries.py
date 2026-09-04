@@ -263,7 +263,7 @@ class VerificationHistoryQueryTests(CoverageScenarioTestCase):
 
 class LatestCapturePerPublicationTests(CoverageScenarioTestCase):
     def latest(self):
-        return {row["source_package_id"]: row for row in self.rows(_LATEST_CAPTURE)}
+        return {row["publication_ref"]: row for row in self.rows(_LATEST_CAPTURE)}
 
     def test_a_recapture_becomes_the_new_latest_for_its_own_package(self):
         first = self.publish("daily/202300220", [1, 2])
@@ -275,26 +275,35 @@ class LatestCapturePerPublicationTests(CoverageScenarioTestCase):
         )
         self.assertEqual(second.status, "published")
 
-        row = self.latest()["daily/202300220"]
-        self.assertEqual(row["capture_id"], second.capture_id)
-        self.assertNotEqual(row["capture_id"], first)
-        self.assertEqual(row["status"], "published")
-        self.assertEqual(row["distinct_notice_count"], 3)
-
-    def test_each_package_ranks_its_own_captures_independently(self):
-        a1 = self.publish("daily/a", [1])
-        path = write_package(self.dir / "a2", [legacy_member(1), legacy_member(2)])
-        a2 = load_package(self.new_conn(), path, "daily/a", force_recapture=True)
-        b1 = self.publish("daily/b", [9])
-
         rows = self.latest()
-        self.assertEqual(rows["daily/a"]["capture_id"], a2.capture_id)
-        self.assertNotEqual(rows["daily/a"]["capture_id"], a1)
-        self.assertEqual(rows["daily/b"]["capture_id"], b1)
+        self.assertEqual(set(rows), {"1-2023", "2-2023", "3-2023"})
+        self.assertTrue(all(row["capture_id"] == second.capture_id for row in rows.values()))
+        self.assertTrue(all(row["capture_id"] != first for row in rows.values()))
+        self.assertTrue(all(row["capture_status"] == "published" for row in rows.values()))
+
+    def test_overlapping_packages_compete_by_publication_identity(self):
+        daily = load_package(
+            self.new_conn(),
+            write_package(self.dir / "daily", [legacy_member(9, country="PL")]),
+            "daily/202300220",
+        )
+        monthly = load_package(
+            self.new_conn(),
+            write_package(self.dir / "monthly", [legacy_member(9, country="DE")]),
+            "monthly/2023-11",
+        )
+
+        row = self.latest()["9-2023"]
+        self.assertEqual(row["capture_id"], monthly.capture_id)
+        self.assertNotEqual(row["capture_id"], daily.capture_id)
+        self.assertEqual(row["source_package_id"], "monthly/2023-11")
+        self.assertEqual(row["buyer_country"], "DE")
 
     def test_an_incomplete_capture_never_becomes_the_latest(self):
         published = self.publish("daily/incomplete", [1])
-        path = write_package(self.dir / "partial", [legacy_member(2), legacy_member(3)])
+        path = write_package(
+            self.dir / "partial", [legacy_member(1, country="DE"), legacy_member(3)]
+        )
         sha, size = digest_archive(path)
         writer = self.new_conn()
         begin = repo.begin_capture(
@@ -306,40 +315,44 @@ class LatestCapturePerPublicationTests(CoverageScenarioTestCase):
             [project_member(m) for m in stream_notices(path)],
         )
 
-        row = self.latest()["daily/incomplete"]
+        row = self.latest()["1-2023"]
         self.assertEqual(row["capture_id"], published)
+        self.assertNotEqual(row["capture_id"], begin.capture.capture_id)
 
 
 class AcquisitionCutoffStateTests(CoverageScenarioTestCase):
     def cutoff(self, ordinal):
         text = _with_params(_CUTOFF, cutoff=ordinal)
-        return {row["source_package_id"]: row for row in self.rows(text)}
+        return {row["publication_ref"]: row for row in self.rows(text)}
 
     def test_the_cutoff_selects_the_capture_current_at_that_point(self):
-        first_id = self.publish("daily/202300220", [1, 2])
+        first = load_package(
+            self.new_conn(),
+            write_package(self.dir / "first", [legacy_member(1, country="PL")]),
+            "daily/202300220",
+        )
         first_ordinal = self.rows(
             "select acquisition_ordinal from tl_read.capture_status"
-            f" where capture_id = {first_id}"
+            f" where capture_id = {first.capture_id}"
         )[0]["acquisition_ordinal"]
-        path = write_package(
-            self.dir / "v2", [legacy_member(1), legacy_member(2), legacy_member(3)]
-        )
         second = load_package(
-            self.new_conn(), path, "daily/202300220", force_recapture=True
+            self.new_conn(),
+            write_package(self.dir / "second", [legacy_member(1, country="DE")]),
+            "monthly/2023-11",
         )
 
         at_first = self.cutoff(first_ordinal)
-        self.assertEqual(at_first["daily/202300220"]["capture_id"], first_id)
-        self.assertEqual(at_first["daily/202300220"]["distinct_notice_count"], 2)
+        self.assertEqual(at_first["1-2023"]["capture_id"], first.capture_id)
+        self.assertEqual(at_first["1-2023"]["buyer_country"], "PL")
 
         at_second = self.cutoff(second.acquisition_ordinal)
-        self.assertEqual(at_second["daily/202300220"]["capture_id"], second.capture_id)
-        self.assertEqual(at_second["daily/202300220"]["distinct_notice_count"], 3)
+        self.assertEqual(at_second["1-2023"]["capture_id"], second.capture_id)
+        self.assertEqual(at_second["1-2023"]["buyer_country"], "DE")
 
     def test_a_package_acquired_after_the_cutoff_is_absent(self):
         self.publish("daily/202300220", [1])
         rows = self.cutoff(0)
-        self.assertNotIn("daily/202300220", rows)
+        self.assertNotIn("1-2023", rows)
 
 
 class OfficialChangeReferencesTests(QueryTestCase):
@@ -372,7 +385,7 @@ class OfficialChangeReferencesTests(QueryTestCase):
         unresolved_shape = rows[("4-2023", 0)]
         self.assertEqual(unresolved_shape["value_shape"], "unresolved_shape")
         self.assertIsNone(unresolved_shape["resolved_target"])
-        self.assertFalse(unresolved_shape["target_loaded"])
+        self.assertIsNone(unresolved_shape["target_loaded"])
 
         not_found = rows[("5-2023", 0)]
         self.assertEqual(not_found["value_shape"], "publication_reference")

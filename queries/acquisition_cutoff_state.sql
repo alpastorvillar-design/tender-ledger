@@ -1,50 +1,47 @@
--- Workload 4: state at an acquisition cutoff.
+-- Workload 4: publication state at an acquisition cutoff.
 --
--- Question: as of a given point in this system's own acquisition order, what
--- did each source package's data look like?
--- Grain: one row per source_package_id that had at least one complete capture
--- at or before the cutoff.
--- Source and filters: tl_read.capture_status, restricted to status in
--- ('published', 'superseded') and acquisition_ordinal <= the cutoff
--- parameter.
--- NULL/absent semantics: a package whose only complete captures were all
--- acquired after the cutoff contributes no row -- as far as this cutoff is
--- concerned, this system held nothing for it yet.
--- Order / tie-break: same total order as workload 2 --
--- (acquisition_ordinal desc, capture_id desc) within each package -- applied
--- only to captures at or before the cutoff.
--- Parameter: :'cutoff' (an acquisition_ordinal value, i.e. a bigint written as
--- a quoted literal). From psql: `-v cutoff=5` and reference :'cutoff'::bigint
--- in the SQL below (already written that way). From Python, as the tests do:
--- replace the literal token `:'cutoff'` with the desired value before
--- executing, e.g. `sql.replace(":'cutoff'", "5")`.
--- Does not let you claim: that acquisition_ordinal 5 corresponds to any
--- particular wall-clock date, or that this is the package's official
--- historical state on some real-world date -- acquisition_ordinal is this
--- system's own acquisition sequence (see db/migrations/0001_core.sql), not a
--- publication or version timestamp. This is "what a backfill run stopped at",
--- not business history.
+-- Question: for each canonical publication identity observed by a cutoff, what
+-- is this system's most recent complete observation at that point?
+-- Grain: one row per (publication_year, publication_number) with a complete
+-- observation at or before the cutoff.
+-- Source and filters: tl_read.notice_history with acquisition_ordinal <= cutoff.
+-- The view already excludes partial and failed captures.
+-- NULL/absent semantics: a publication first observed after the cutoff has no
+-- row. Projected field statuses retain their own absent/unknown meanings.
+-- Order / tie-break: acquisition_ordinal desc, then capture_id desc, within the
+-- canonical publication identity after applying the cutoff.
+-- Parameter: :'cutoff', a bigint acquisition ordinal. In psql use
+-- `-v cutoff=5`; tests substitute the same token with a numeric literal.
+-- Does not let you claim: legal or official validity at a real-world time.
+-- Acquisition order is this system's observation sequence.
 select
+    ranked.publication_ref,
+    ranked.publication_year,
+    ranked.publication_number,
     ranked.source_package_id,
     ranked.capture_id,
     ranked.acquisition_ordinal,
-    ranked.status,
-    ranked.artifact_sha256,
+    ranked.capture_status,
     ranked.contract_version,
-    ranked.distinct_notice_count,
-    ranked.source_coverage_verified,
-    ranked.acquired_at,
-    ranked.published_at
+    ranked.source_format,
+    ranked.schema_version,
+    ranked.notice_version,
+    ranked.publication_date,
+    ranked.buyer_country,
+    ranked.buyer_country_iso,
+    ranked.buyer_country_status,
+    ranked.primary_cpv,
+    ranked.primary_cpv_status,
+    ranked.change_reference_status
 from (
     select
-        cs.*,
+        h.*,
         row_number() over (
-            partition by cs.source_package_id
-            order by cs.acquisition_ordinal desc, cs.capture_id desc
+            partition by h.publication_year, h.publication_number
+            order by h.acquisition_ordinal desc, h.capture_id desc
         ) as rn
-    from tl_read.capture_status cs
-    where cs.status in ('published', 'superseded')
-      and cs.acquisition_ordinal <= :'cutoff'::bigint
+    from tl_read.notice_history h
+    where h.acquisition_ordinal <= :'cutoff'::bigint
 ) ranked
 where ranked.rn = 1
-order by ranked.source_package_id;
+order by ranked.publication_year, ranked.publication_number;
