@@ -9,7 +9,7 @@ import datetime as dt
 import unittest
 
 from tender_ledger.packages import PackageError
-from tender_ledger.projection import CONTRACT_VERSION, project_notice
+from tender_ledger.projection import CONTRACT_VERSION, ChangeReference, project_notice
 
 
 def legacy(doc_id="000995-2020", namespace="R2.0.9", version_attr='VERSION="R2.0.9.S05.E01"',
@@ -36,9 +36,24 @@ def legacy(doc_id="000995-2020", namespace="R2.0.9", version_attr='VERSION="R2.0
 _UNSET = object()
 
 
+def _change_reference_element(value, scheme):
+    attr = f' schemeName="{scheme}"' if scheme else ""
+    text = value or ""
+    return f"<efbc:ChangedNoticeIdentifier{attr}>{text}</efbc:ChangedNoticeIdentifier>"
+
+
+def _change_references_xml(change_refs):
+    """``change_refs``: an iterable of (value, scheme_name) pairs. ``value`` may
+    be ``""`` or ``None`` to emit an empty element (whitespace-only text)."""
+    if not change_refs:
+        return ""
+    items = "".join(_change_reference_element(value, scheme) for value, scheme in change_refs)
+    return f"<efac:Changes>{items}</efac:Changes>"
+
+
 def eforms(pub_id="00000995-2020", pub_date="2020-01-03Z", issue_date="2019-12-26+01:00",
            customization="eforms-sdk-1.9", version_id="01", buyer_country="DEU",
-           contracting_ref=_UNSET, orgs=_UNSET,
+           contracting_ref=_UNSET, orgs=_UNSET, change_refs=(),
            main_cpv='<cac:MainCommodityClassification><cbc:ItemClassificationCode listName="cpv">72000000</cbc:ItemClassificationCode></cac:MainCommodityClassification>',
            extra_cpv='<cac:AdditionalCommodityClassification><cbc:ItemClassificationCode listName="cpv">72100000</cbc:ItemClassificationCode></cac:AdditionalCommodityClassification>'):
     # orgs: list of (id, country). contracting_ref: the buyer reference the
@@ -81,6 +96,7 @@ def eforms(pub_id="00000995-2020", pub_date="2020-01-03Z", issue_date="2019-12-2
         f'<efac:Publication><efbc:NoticePublicationID>{pub_id}</efbc:NoticePublicationID>'
         f'{f"<efbc:PublicationDate>{pub_date}</efbc:PublicationDate>" if pub_date else ""}'
         '</efac:Publication>'
+        f'{_change_references_xml(change_refs)}'
         '</EformsExtension></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>'
         f'<cbc:CustomizationID>{customization}</cbc:CustomizationID>'
         '<cbc:ID schemeName="notice-id">d758d45a-515d-4b92-b441-14c985063716</cbc:ID>'
@@ -206,10 +222,66 @@ class EformsProjectionTests(unittest.TestCase):
             project_notice("day/00000995_2020.xml", eforms(pub_date=""))
 
 
+class ChangeReferenceProjectionTests(unittest.TestCase):
+    def test_legacy_is_not_applicable_with_no_references(self):
+        p = project_notice("day/000995_2020.xml", legacy())
+        self.assertEqual(p.change_reference_status, "not_applicable")
+        self.assertEqual(p.change_references, ())
+
+    def test_eforms_without_the_element_is_absent(self):
+        p = project_notice("day/00000995_2020.xml", eforms())
+        self.assertEqual(p.change_reference_status, "absent")
+        self.assertEqual(p.change_references, ())
+
+    def test_eforms_with_one_reference_is_present_and_keeps_value_and_scheme(self):
+        p = project_notice(
+            "day/00000995_2020.xml",
+            eforms(change_refs=[("00012345-2019", "notice-id-ref")]),
+        )
+        self.assertEqual(p.change_reference_status, "present")
+        self.assertEqual(
+            p.change_references, (ChangeReference(0, "00012345-2019", "notice-id-ref"),)
+        )
+
+    def test_a_missing_scheme_name_is_kept_as_none_not_guessed(self):
+        p = project_notice(
+            "day/00000995_2020.xml", eforms(change_refs=[("00012345-2019", None)])
+        )
+        self.assertIsNone(p.change_references[0].scheme_name)
+
+    def test_multiple_references_keep_document_order_and_duplicates(self):
+        refs = [
+            ("00012345-2019", "notice-id-ref"),
+            ("00012345-2019", "notice-id-ref"),  # a genuine duplicate is not collapsed
+            ("d758d45a-515d-4b92-b441-14c985063716/02", None),
+        ]
+        p = project_notice("day/00000995_2020.xml", eforms(change_refs=refs))
+        self.assertEqual(p.change_reference_status, "present")
+        self.assertEqual([r.ordinal for r in p.change_references], [0, 1, 2])
+        self.assertEqual([r.value for r in p.change_references], [v for v, _ in refs])
+
+    def test_an_empty_reference_element_condemns_the_member(self):
+        with self.assertRaises(PackageError):
+            project_notice("day/00000995_2020.xml", eforms(change_refs=[("", None)]))
+
+    def test_a_whitespace_only_reference_element_condemns_the_member(self):
+        with self.assertRaises(PackageError):
+            project_notice("day/00000995_2020.xml", eforms(change_refs=[("   ", None)]))
+
+    def test_one_valid_and_one_empty_reference_still_condemns_the_member(self):
+        refs = [("00012345-2019", "notice-id-ref"), ("", None)]
+        with self.assertRaises(PackageError):
+            project_notice("day/00000995_2020.xml", eforms(change_refs=refs))
+
+
 class ContractVersionTests(unittest.TestCase):
     def test_contract_version_is_stable_string(self):
         self.assertIsInstance(CONTRACT_VERSION, str)
         self.assertTrue(CONTRACT_VERSION)
+
+    def test_contract_version_is_two(self):
+        # M3b's projection contract: official change references are now kept.
+        self.assertEqual(CONTRACT_VERSION, "2")
 
 
 if __name__ == "__main__":

@@ -2,13 +2,24 @@
 
 Element paths were derived from a real daily package (legacy R2.0.8/R2.0.9 and
 eForms SDK 1.3-1.9). The projection is an explicit allowlist: canonical identity,
-schema provenance, calendar dates, buyer country, and CPV classification. Contact
-details (names, e-mail, phone, addresses) are never read.
+schema provenance, calendar dates, buyer country, CPV classification, and (from
+contract v2) official change references. Contact details (names, e-mail, phone,
+addresses) are never read.
 
 Field status is explicit: ``present`` (a value was published), ``absent`` (the
 element the contract expects is missing or empty), ``not_applicable`` (reserved
 for notice shapes where the field has no meaning). A member that cannot be parsed
 at all is rejected upstream, so there is no partial row.
+
+Contract v2 adds ``change_reference_status`` and an ordered ``change_references``
+tuple, projected from every ``efbc:ChangedNoticeIdentifier`` an eForms notice
+publishes (a legacy notice has no such element and is ``not_applicable``). A real
+mixed daily package showed this is genuinely one-to-many -- 217 occurrences across
+1,154 eForms notices, two of them carrying more than one -- so it is kept as an
+ordered collection, never collapsed into a scalar column or deduplicated. An
+element that is present but empty or whitespace-only is not a lesser form of
+``absent``: it is rejected, which fails the whole member the same way a missing
+publication date does.
 """
 
 import datetime as dt
@@ -18,12 +29,21 @@ from dataclasses import dataclass
 
 from .packages import NoticeKey, PackageError, parse_notice
 
-CONTRACT_VERSION = "1"
+CONTRACT_VERSION = "2"
 
 _CBC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2}"
 _CAC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2}"
 _EFAC = "{http://data.europa.eu/p27/eforms-ubl-extension-aggregate-components/1}"
 _EFBC = "{http://data.europa.eu/p27/eforms-ubl-extension-basic-components/1}"
+
+#: ``efac:Changes/efbc:ChangedNoticeIdentifier`` -- found by local name via
+#: ``root.iter()`` like the other extension lookups below, so it is located
+#: wherever the extension block nests it rather than by a brittle exact path.
+_CHANGED_NOTICE_IDENTIFIER = f"{_EFBC}ChangedNoticeIdentifier"
+
+CHANGE_REFERENCE_PRESENT = "present"
+CHANGE_REFERENCE_ABSENT = "absent"
+CHANGE_REFERENCE_NOT_APPLICABLE = "not_applicable"
 
 # eForms publishes 3-letter country codes; legacy publishes ISO 3166-1 alpha-2.
 # This maps the European codes that dominate TED to alpha-2 for a single
@@ -38,6 +58,20 @@ _ALPHA3_TO_ALPHA2 = {
     "CHE": "CH", "GBR": "GB", "ALB": "AL", "MNE": "ME", "MKD": "MK", "SRB": "RS",
     "TUR": "TR", "BIH": "BA", "UKR": "UA", "MDA": "MD", "GEO": "GE", "XKX": "XK",
 }
+
+
+@dataclass(frozen=True)
+class ChangeReference:
+    """One ``efbc:ChangedNoticeIdentifier`` occurrence, kept exactly as published.
+
+    ``ordinal`` is the element's position in document order among its notice's
+    change references, starting at 0 -- stable, never reassigned by value or by
+    scheme, and never used to deduplicate.
+    """
+
+    ordinal: int
+    value: str
+    scheme_name: str | None
 
 
 @dataclass(frozen=True)
@@ -56,6 +90,8 @@ class ProjectedNotice:
     primary_cpv: str | None
     primary_cpv_status: str
     additional_cpv: tuple[str, ...]
+    change_reference_status: str
+    change_references: tuple[ChangeReference, ...]
     notice_uuid: str | None = None
     notice_version: str | None = None
     contract_version: str = CONTRACT_VERSION
@@ -86,6 +122,26 @@ def _normalize_country(code: str | None) -> tuple[str | None, str | None, str]:
     if re.fullmatch(r"[A-Z]{2}", code):
         return code, code, "present"
     return code, _ALPHA3_TO_ALPHA2.get(code), "present"
+
+
+def _change_references(root: ET.Element, member_name: str) -> tuple[ChangeReference, ...]:
+    """Every ``efbc:ChangedNoticeIdentifier`` in document order, or raise.
+
+    A present-but-empty element is not folded into ``absent``: it names a value
+    the source claims to have published and did not, which is a different failure
+    than the element simply being missing, so the member is rejected rather than
+    silently downgraded.
+    """
+    references = []
+    for ordinal, element in enumerate(root.iter(_CHANGED_NOTICE_IDENTIFIER)):
+        value = (element.text or "").strip()
+        if not value:
+            raise PackageError(
+                f"Empty change reference identifier in {member_name}",
+                code="empty_change_reference",
+            )
+        references.append(ChangeReference(ordinal, value, element.get("schemeName")))
+    return tuple(references)
 
 
 def _project_legacy(root: ET.Element, key, member_name: str, version: str) -> ProjectedNotice:
@@ -134,6 +190,8 @@ def _project_legacy(root: ET.Element, key, member_name: str, version: str) -> Pr
         primary_cpv=primary_cpv,
         primary_cpv_status="present" if primary_cpv else "absent",
         additional_cpv=tuple(cpv_codes[1:]),
+        change_reference_status=CHANGE_REFERENCE_NOT_APPLICABLE,
+        change_references=(),
     )
 
 
@@ -169,6 +227,11 @@ def _project_eforms(root: ET.Element, key, member_name: str, version: str) -> Pr
                 cpv_extra.append(code.strip())
     primary_cpv = cpv_main[0] if cpv_main else None
 
+    change_references = _change_references(root, member_name)
+    change_reference_status = (
+        CHANGE_REFERENCE_PRESENT if change_references else CHANGE_REFERENCE_ABSENT
+    )
+
     return ProjectedNotice(
         key=key,
         source_format="eforms",
@@ -184,6 +247,8 @@ def _project_eforms(root: ET.Element, key, member_name: str, version: str) -> Pr
         primary_cpv=primary_cpv,
         primary_cpv_status="present" if primary_cpv else "absent",
         additional_cpv=tuple(cpv_main[1:] + cpv_extra),
+        change_reference_status=change_reference_status,
+        change_references=change_references,
         notice_uuid=notice_uuid,
         notice_version=notice_version,
     )
