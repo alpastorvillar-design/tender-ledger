@@ -1,0 +1,45 @@
+{
+  "manifest_version": 1,
+  "packages": [
+    {
+      "order": 1,
+      "source_package_id": "monthly/2020-01",
+      "notice_count_observed": 50123,
+      "compressed_bytes_observed": 139301298,
+      "observed_at": "2026-09-04",
+      "purpose": "legacy"
+    },
+    {
+      "order": 2,
+      "source_package_id": "monthly/2020-02",
+      "notice_count_observed": 50522,
+      "compressed_bytes_observed": 139008562,
+      "observed_at": "2026-09-04",
+      "purpose": "legacy; exceeds the 100,000-notice rehearsal gate"
+    },
+    {
+      "order": 3,
+      "source_package_id": "monthly/2023-11",
+      "notice_count_observed": 61638,
+      "compressed_bytes_observed": 250854274,
+      "observed_at": "2026-09-04",
+      "purpose": "expected real overlap with the accepted daily package"
+    },
+    {
+      "order": 4,
+      "source_package_id": "monthly/2024-01",
+      "notice_count_observed": 65708,
+      "compressed_bytes_observed": 291615691,
+      "observed_at": "2026-09-04",
+      "purpose": "eForms monthly"
+    },
+    {
+      "order": 5,
+      "source_package_id": "daily/202300220",
+      "notice_count_observed": 2967,
+      "compressed_bytes_observed": 12377691,
+      "observed_at": "2026-09-04",
+      "purpose": "already-accepted mixed daily package"
+    }
+  ]
+}
