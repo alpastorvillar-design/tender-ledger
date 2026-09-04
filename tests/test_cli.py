@@ -75,13 +75,15 @@ class CliTests(unittest.TestCase):
 
     def test_load_then_status_reports_the_published_capture(self):
         pkg = write_package(self.dir / "d.tar.gz", [legacy_member(1), legacy_member(2)])
-        load = self.run_cli("load", str(pkg), "--package-id", "daily/cli", "--batch-size", "1")
+        load = self.run_cli(
+            "load", str(pkg), "--package-id", "daily/202300221", "--batch-size", "1"
+        )
         self.assertEqual(load.returncode, 0, load.stderr)
         payload = json.loads(load.stdout)
         self.assertEqual(payload["status"], "published")
         self.assertEqual(payload["loaded_row_count"], 2)
 
-        status = self.run_cli("status", "--package-id", "daily/cli")
+        status = self.run_cli("status", "--package-id", "daily/202300221")
         self.assertEqual(status.returncode, 0, status.stderr)
         rows = json.loads(status.stdout)
         self.assertEqual(len(rows), 1)
@@ -91,27 +93,29 @@ class CliTests(unittest.TestCase):
 
     def test_force_recapture_acquires_the_package_again(self):
         pkg = write_package(self.dir / "d.tar.gz", [legacy_member(1)])
-        first = self.run_cli("load", str(pkg), "--package-id", "daily/force")
+        first = self.run_cli("load", str(pkg), "--package-id", "daily/202300222")
         self.assertEqual(first.returncode, 0, first.stderr)
 
-        replay = self.run_cli("load", str(pkg), "--package-id", "daily/force")
+        replay = self.run_cli("load", str(pkg), "--package-id", "daily/202300222")
         self.assertEqual(json.loads(replay.stdout)["capture_id"],
                          json.loads(first.stdout)["capture_id"])
 
         forced = self.run_cli(
-            "load", str(pkg), "--package-id", "daily/force", "--force-recapture"
+            "load", str(pkg), "--package-id", "daily/202300222", "--force-recapture"
         )
         self.assertEqual(forced.returncode, 0, forced.stderr)
         payload = json.loads(forced.stdout)
         self.assertEqual(payload["status"], "published")
         self.assertNotEqual(payload["capture_id"], json.loads(first.stdout)["capture_id"])
 
-        rows = json.loads(self.run_cli("status", "--package-id", "daily/force").stdout)
+        rows = json.loads(
+            self.run_cli("status", "--package-id", "daily/202300222").stdout
+        )
         self.assertEqual([r["status"] for r in rows], ["superseded", "published"])
 
     def test_a_failed_load_exits_non_zero_and_says_why(self):
         pkg = write_package(self.dir / "dup.tar.gz", [legacy_member(7), eforms_member(7)])
-        result = self.run_cli("load", str(pkg), "--package-id", "daily/clifail")
+        result = self.run_cli("load", str(pkg), "--package-id", "daily/202300223")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)["status"], "failed")
         self.assertIn("UniqueViolation", result.stderr)
@@ -119,12 +123,14 @@ class CliTests(unittest.TestCase):
     def test_verify_refuses_a_capture_it_cannot_check_and_exits_non_zero(self):
         # No network: the run has to stop on the capture itself, before any HTTP.
         pkg = write_package(self.dir / "d.tar.gz", [legacy_member(1)])
-        self.run_cli("load", str(pkg), "--package-id", "daily/verifycli")
+        self.run_cli("load", str(pkg), "--package-id", "daily/202300224")
         result = self.run_cli("verify", "--capture-id", "999999")
         self.assertEqual(result.returncode, 1)
         self.assertIn("does not exist", result.stderr)
 
-        rows = json.loads(self.run_cli("status", "--package-id", "daily/verifycli").stdout)
+        rows = json.loads(
+            self.run_cli("status", "--package-id", "daily/202300224").stdout
+        )
         self.assertEqual(rows[0]["verification_state"], None)
         self.assertFalse(rows[0]["source_coverage_verified"])
 

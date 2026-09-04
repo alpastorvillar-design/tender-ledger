@@ -24,7 +24,8 @@ from pathlib import Path
 import psycopg
 
 from .db import repository as repo
-from .packages import Limits, PackageError, limits_for, stream_notices
+from .package_contract import policy_for
+from .packages import Limits, PackageError, limits_from, stream_notices
 from .projection import CONTRACT_VERSION, project_member
 
 _DEFAULT_BATCH_SIZE = 500
@@ -105,7 +106,7 @@ def load_package(
     # allowed to cost. A daily package therefore cannot be loaded through wider
     # limits than the ones that acquired it, and an identity this contract does
     # not recognize gets the narrowest policy rather than a permissive one.
-    limits = limits or limits_for(source_package_id)
+    limits = limits or limits_from(policy_for(source_package_id))
     sha256, size = digest_archive(path)
 
     begin = repo.begin_capture(

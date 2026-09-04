@@ -112,6 +112,14 @@ class InspectPolicyTests(PolicyPathTestCase):
         result = self.run_cli("inspect", str(self.archive), "--max-member-mib", "16")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_an_unrecognized_package_identity_is_not_treated_as_daily(self):
+        result = self.run_cli(
+            "inspect", str(self.archive), "--package-id", "daily/scratch"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("canonical package identity", result.stderr)
+
 
 class LoadPolicyTests(PolicyPathTestCase):
     setUpClass = classmethod(lambda cls: ensure_test_database())
@@ -134,12 +142,14 @@ class LoadPolicyTests(PolicyPathTestCase):
         self.assertEqual(payload["status"], "published")
         self.assertEqual(payload["loaded_row_count"], 2)
 
-    def test_an_unrecognized_identity_gets_the_narrowest_policy(self):
-        # Fail closed: nothing may reach a wider ceiling by naming a package the
-        # contract does not recognize.
+    def test_an_unrecognized_identity_is_refused_before_a_capture_exists(self):
         result = self.run_cli("load", str(self.archive), "--package-id", "daily/scratch")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Member exceeds", result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("canonical package identity", result.stderr)
+        self.assertEqual(
+            self.conn.execute("select count(*) from tl_work.capture").fetchone()[0], 0
+        )
 
 
 class IngestPolicyTests(PolicyPathTestCase):

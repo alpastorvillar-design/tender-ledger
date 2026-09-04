@@ -164,7 +164,8 @@ have stopped at:
 | --- | --- |
 | `sha256`, compressed / expanded / XML bytes | Which bytes were surveyed, and what they cost to read |
 | `member_count`, `xml_member_count`, `notice_count` | Members admitted, members named `.xml`, and distinct loadable identities |
-| `formats`, `schema_versions`, `roots` | Which supported eras and schema versions are actually in there |
+| `formats`, `schema_versions`, `roots` | Which supported eras and schema versions are actually in there; version output is capped at 20 categories |
+| `schema_version_kinds` | Total distinct supported versions, including categories omitted from the bounded map |
 | `incompatible_member_count`, `incompatible_reasons` | How many members a load would reject, by reason code |
 | `unsupported_roots`, `unsupported_root_kinds` | Which roots they turned out to have — the finding that decides whether the contract should grow |
 | `duplicate_identity_count`, `duplicate_identity_sample` | Repeated canonical identities, which the primary key would refuse |

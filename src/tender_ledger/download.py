@@ -36,7 +36,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .package_contract import DAILY_POLICY, ResourcePolicy, package_identity, policy_for
+from .package_contract import DAILY_POLICY, ResourcePolicy, package_identity
 from .packages import Limits, PackageError, inspect_package, limits_from
 from .source_api import Clock, parse_retry_after
 
@@ -93,7 +93,7 @@ def budgets_from(policy: ResourcePolicy) -> DownloadBudgets:
 
 def budgets_for(source_package_id: str) -> DownloadBudgets:
     """The acquisition budgets this package identity is allowed to cost."""
-    return budgets_from(policy_for(source_package_id))
+    return budgets_from(package_identity(source_package_id).policy)
 
 
 @dataclass(frozen=True)
@@ -175,7 +175,9 @@ def download_package(
     existing destination untouched; the rename is the only thing that changes
     what a reader of the data directory sees.
     """
-    policy = policy_for(source_package_id)
+    # URL injection is available to local tests, but it must not turn the
+    # package identity itself into an unchecked label.
+    policy = package_identity(source_package_id).policy
     budgets = budgets or budgets_from(policy)
     clock = clock or Clock()
     limits = limits or limits_from(policy)

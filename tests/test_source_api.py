@@ -225,6 +225,12 @@ class MonthlyMembershipTests(unittest.TestCase):
     def test_a_missing_or_unparseable_publication_date_never_verifies(self):
         exc = self.fails([api_page([1], total=1, publication_date="2023-11-32Z")])
         self.assertIn("is not a calendar date", str(exc))
+        for malformed in ("2023-11-15garbage", "2023-11-15+25:00"):
+            with self.subTest(malformed=malformed):
+                exc = self.fails([
+                    api_page([1], total=1, publication_date=malformed)
+                ])
+                self.assertIn("is not a calendar date", str(exc))
         exc = self.fails([raw_page(json.dumps({
             "notices": [{"publication-number": "1-2023", "ojs-number": "220/2023"}],
             "totalNoticeCount": 1, "timedOut": False,

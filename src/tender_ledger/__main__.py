@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from .package_contract import package_identity
 from .packages import Limits, inspect_package, limits_for, survey_package
 
 
@@ -108,6 +109,8 @@ def _inspection_limits(args: argparse.Namespace) -> Limits:
     let a hand-typed number approve bytes the loader of that same package would
     refuse.
     """
+    if args.package_id:
+        package_identity(args.package_id)
     policy = limits_for(args.package_id) if args.package_id else Limits()
     requested = {
         "compressed_bytes": _mib(args.max_compressed_mib),
@@ -183,6 +186,10 @@ def _cmd_load(args: argparse.Namespace) -> int:
     from . import db
     from .loader import load_package
 
+    # A CLI load creates durable state under this identity. Refuse aliases and
+    # arbitrary labels before opening PostgreSQL rather than assigning them a
+    # fallback policy and leaving captures outside the supported key space.
+    package_identity(args.package_id)
     with db.connect() as conn:
         result = load_package(
             conn, args.archive, args.package_id,

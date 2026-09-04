@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Protocol
 
-from .package_contract import DAILY_POLICY, ResourcePolicy, package_identity, policy_for
+from .package_contract import DAILY_POLICY, ResourcePolicy, package_identity
 
 SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
 VERIFIER_VERSION = "1"
@@ -53,6 +53,9 @@ _FIELDS = ("publication-number", "publication-date", "ojs-number")
 _USER_AGENT = "tender-ledger/0.1 (+https://github.com/alpastorvillar-design/tender-ledger)"
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _PUBLICATION_NUMBER = re.compile(r"(?P<number>[0-9]{1,12})-(?P<year>[0-9]{4})")
+_PUBLICATION_DATE = re.compile(
+    r"(?P<day>[0-9]{4}-[0-9]{2}-[0-9]{2})(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])?"
+)
 
 
 class SourceUnavailable(RuntimeError):
@@ -176,7 +179,7 @@ def budgets_from(policy: ResourcePolicy) -> Budgets:
 
 def budgets_for(source_package_id: str) -> Budgets:
     """The enumeration budgets this package identity is allowed to cost."""
-    return budgets_from(policy_for(source_package_id))
+    return budgets_from(package_identity(source_package_id).policy)
 
 
 class Clock:
@@ -366,9 +369,14 @@ def _page_keys(data: dict, query: PackageQuery) -> tuple[list[tuple[int, int]], 
         missing = [name for name in _FIELDS if not isinstance(notice.get(name), str)]
         if missing:
             raise SourceUnavailable(f"a notice entry is missing {', '.join(missing)}")
+        date_match = _PUBLICATION_DATE.fullmatch(notice["publication-date"])
         try:
-            # The suffix ("+01:00", "Z") does not change the calendar date.
-            published_on = date.fromisoformat(notice["publication-date"][:10])
+            # The observed suffix ("+01:00", "Z") does not change the source's
+            # calendar date, but arbitrary text after a valid prefix is not a
+            # parseable publication date.
+            published_on = date.fromisoformat(
+                "" if date_match is None else date_match["day"]
+            )
         except ValueError as exc:
             raise SourceUnavailable(
                 f"publication-date {notice['publication-date']!r} is not a calendar date"

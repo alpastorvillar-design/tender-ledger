@@ -237,15 +237,24 @@ class PolicyAdapterTests(unittest.TestCase):
 
 
 class UnrecognizedIdentityTests(unittest.TestCase):
-    def test_an_identity_this_contract_does_not_know_gets_the_narrowest_policy(self):
-        # Fail closed: an unrecognized identity must never widen a ceiling.
+    def test_a_lower_level_unknown_label_gets_the_narrowest_policy(self):
+        # Repository-level recovery can encounter an old manual label. It must
+        # never widen a ceiling, even though operator-facing adapters reject it.
         self.assertEqual(policy_for("daily/scratch"), DAILY_POLICY)
         self.assertEqual(policy_for("monthly/2020-1"), DAILY_POLICY)
         self.assertEqual(policy_for(""), DAILY_POLICY)
 
-    def test_an_unrecognized_identity_still_has_no_url_and_no_destination(self):
-        with self.assertRaises(UnsupportedPackage):
-            package_identity("daily/scratch")
+    def test_operator_facing_adapters_reject_an_unrecognized_identity(self):
+        for resolve in (
+            package_identity,
+            packages.limits_for,
+            download.budgets_for,
+            source_api.budgets_for,
+        ):
+            with self.subTest(resolve=resolve.__module__), self.assertRaises(
+                UnsupportedPackage
+            ):
+                resolve("daily/scratch")
 
 
 if __name__ == "__main__":

@@ -198,9 +198,9 @@ ceiling bounds work rather than storage.
 `inspect`, `load`, `verify` and `ingest` all resolve their policy from the
 identity, so no command can accept an archive another command would refuse.
 `inspect --package-id` treats the policy as the maximum: an explicit `--max-*`
-flag may narrow it for an ad-hoc look and is refused if it would widen it. An
-identity this contract does not recognize — `load` accepts any name for a local
-file — gets the *narrowest* policy, never a permissive one.
+flag may narrow it for an ad-hoc look and is refused if it would widen it. The
+commands reject an identity this contract does not recognize before downloading
+bytes or creating durable database state.
 
 Retried: connection failures, timeouts, HTTP 408/429/500/502/503/504, and a body
 that ends before its declared `Content-Length`. Not retried: a rejected TLS

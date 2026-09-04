@@ -191,12 +191,12 @@ def package_identity(source_package_id: str) -> PackageIdentity:
 
 
 def policy_for(source_package_id: str) -> ResourcePolicy:
-    """The ceilings this identity may cost. Unrecognized identities fail closed.
+    """Return conservative ceilings for a lower-level package label.
 
-    ``load`` accepts a local archive under whatever identity a caller names, so
-    this cannot raise. An identity the contract does not recognize therefore gets
-    the *narrowest* policy rather than a permissive default: a wrong guess makes
-    a load refuse work, never accept more of it.
+    User-facing operations validate canonical identities before they reach this
+    helper. Repository-level operations may still encounter an older or manually
+    created capture label; it gets the narrowest policy rather than a permissive
+    one, so a wrong guess can only refuse work.
     """
     try:
         return package_identity(source_package_id).policy

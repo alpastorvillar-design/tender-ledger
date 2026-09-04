@@ -108,6 +108,36 @@ class CompatibleSurveyTests(SurveyTestCase):
         self.assertTrue(result["compatible_for_load"])
         self.assertEqual(result["source_package_id"], "monthly/2020-01")
 
+    def test_a_reported_source_identity_must_be_canonical(self):
+        path = self.archive([legacy_member(1)])
+        with self.assertRaisesRegex(ValueError, "canonical package identity"):
+            survey_package(path, source_package_id="daily/scratch")
+
+    def test_the_schema_version_inventory_has_a_bounded_number_of_entries(self):
+        members = [
+            legacy_member(
+                number,
+                version_attr=f'VERSION="R2.0.9.S{number:03d}.E01"',
+            )
+            for number in range(1, 26)
+        ]
+        result = self.survey(members)
+        self.assertTrue(result["compatible_for_load"])
+        self.assertEqual(result["schema_version_kinds"], 25)
+        self.assertEqual(len(result["schema_versions"]), 20)
+
+    def test_an_overlong_schema_version_is_an_incompatibility_not_output(self):
+        secret_suffix = "private-value-" * 30
+        result = self.survey([
+            legacy_member(
+                1,
+                version_attr=f'VERSION="R2.0.9.{secret_suffix}"',
+            )
+        ])
+        self.assertFalse(result["compatible_for_load"])
+        self.assertEqual(result["incompatible_reasons"], {"unsupported_version": 1})
+        self.assertNotIn(secret_suffix, json.dumps(result))
+
 
 class IncompatibleSurveyTests(SurveyTestCase):
     def test_an_unsupported_root_is_counted_and_the_inventory_finishes(self):
@@ -173,6 +203,18 @@ class IncompatibleSurveyTests(SurveyTestCase):
         self.assertEqual(result["duplicate_identity_sample"], ["1-2023"])
         self.assertEqual(result["notice_count"], 2)
         self.assertEqual(result["member_count"], 3)
+
+    def test_repeated_identities_remain_part_of_the_schema_inventory(self):
+        duplicate_name = "2023-220/00000001_2023.xml"
+        result = self.survey([
+            legacy_member(1),
+            (duplicate_name, eforms_member(1, customization="eforms-sdk-1.7")[1]),
+            legacy_member(2),
+        ])
+        self.assertFalse(result["compatible_for_load"])
+        self.assertEqual(result["duplicate_identity_count"], 1)
+        self.assertEqual(result["formats"], {"eforms": 1, "legacy": 2})
+        self.assertEqual(result["schema_version_kinds"], 2)
 
     def test_a_non_xml_member_is_a_rejection_and_not_a_repeated_identity(self):
         # The two counters are computed from different populations; a member that

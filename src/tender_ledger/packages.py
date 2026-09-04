@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from .package_contract import DAILY_POLICY, ResourcePolicy, policy_for
+from .package_contract import (
+    DAILY_POLICY,
+    ResourcePolicy,
+    package_identity,
+)
 
 
 class PackageError(ValueError):
@@ -73,7 +77,7 @@ def limits_from(policy: ResourcePolicy) -> Limits:
 
 def limits_for(source_package_id: str) -> Limits:
     """The archive limits this package identity is allowed to cost."""
-    return limits_from(policy_for(source_package_id))
+    return limits_from(package_identity(source_package_id).policy)
 
 
 LEGACY_ROOTS = {
@@ -85,6 +89,7 @@ EFORMS_ROOTS = {
     for name in ("ContractNotice", "ContractAwardNotice", "PriorInformationNotice")
 }
 CBC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2}"
+MAX_SCHEMA_VERSION_CHARS = 128
 
 
 def parse_notice(member_name: str, xml: bytes) -> tuple[ET.Element, NoticeKey, str, str]:
@@ -118,11 +123,20 @@ def parse_notice(member_name: str, xml: bytes) -> tuple[ET.Element, NoticeKey, s
         # Some published legacy members omit VERSION; their namespace still
         # identifies the supported schema family.
         version = root.get("VERSION") or root.tag.split("/")[-2]
+        if len(version) > MAX_SCHEMA_VERSION_CHARS:
+            raise PackageError(
+                f"Unsupported schema version in {member_name}",
+                code="unsupported_version",
+            )
         return root, key, "legacy", version
     if root.tag in EFORMS_ROOTS:
         version = root.findtext(f"{CBC}CustomizationID")
         identifier = root.find(f"{CBC}ID")
-        if not version or not version.startswith("eforms-sdk-"):
+        if (
+            not version
+            or not version.startswith("eforms-sdk-")
+            or len(version) > MAX_SCHEMA_VERSION_CHARS
+        ):
             raise PackageError(
                 f"Missing or unsupported CustomizationID in {member_name}",
                 code="unsupported_customization",
@@ -323,6 +337,9 @@ def survey_package(
     carries counts, schema provenance and sanitized member names -- never XML
     content, notice fields or filesystem paths.
     """
+    if source_package_id is not None:
+        package_identity(source_package_id)
+
     keys: set[NoticeKey] = set()
     formats: Counter[str] = Counter()
     versions: Counter[str] = Counter()
@@ -346,6 +363,12 @@ def survey_package(
     checksum = _digest(path)
     with _PackageArchive(path, limits) as archive:
         for member in archive.members(on_rejected=reject):
+            # These describe XML members, not unique notice identities. Keep a
+            # repeated identity in the schema inventory even though the package
+            # remains incompatible for loading.
+            formats[member.source_format] += 1
+            versions[member.schema_version] += 1
+            roots[member.root.tag] += 1
             if member.key in keys:
                 # A load fails on this through the primary key. Here it is one
                 # more finding, so the rest of the archive still gets counted.
@@ -354,9 +377,6 @@ def survey_package(
                     duplicates.append(f"{member.key.number}-{member.key.year}")
                 continue
             keys.add(member.key)
-            formats[member.source_format] += 1
-            versions[member.schema_version] += 1
-            roots[member.root.tag] += 1
         return {
             "source_package_id": source_package_id,
             "sha256": checksum,
@@ -367,13 +387,14 @@ def survey_package(
             "xml_member_count": archive.xml_member_count,
             "notice_count": len(keys),
             "formats": dict(sorted(formats.items())),
-            "schema_versions": dict(sorted(versions.items())),
+            "schema_versions": _bounded_counts(versions),
+            "schema_version_kinds": len(versions),
             "roots": dict(sorted(roots.items())),
             "duplicate_identity_count": duplicate_count,
             "duplicate_identity_sample": duplicates,
             "incompatible_member_count": rejected_count,
             "incompatible_reasons": dict(sorted(reasons.items())),
-            "unsupported_roots": dict(unsupported_roots.most_common(SURVEY_SAMPLE_LIMIT)),
+            "unsupported_roots": _bounded_counts(unsupported_roots),
             "unsupported_root_kinds": len(unsupported_roots),
             "incompatible_sample": rejected,
             "compatible_for_load": rejected_count == 0 and duplicate_count == 0,
@@ -383,6 +404,12 @@ def survey_package(
 def _member_label(member_name: str) -> str:
     """A member's own name, without its path and bounded in length."""
     return PurePosixPath(member_name).name[:120]
+
+
+def _bounded_counts(values: Counter[str]) -> dict[str, int]:
+    """Return the most frequent categories with deterministic tie-breaking."""
+    ordered = sorted(values.items(), key=lambda item: (-item[1], item[0]))
+    return dict(ordered[:SURVEY_SAMPLE_LIMIT])
 
 
 def _digest(path: Path) -> str:
