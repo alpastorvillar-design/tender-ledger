@@ -20,9 +20,11 @@ remember.
 
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +54,8 @@ class ManifestSummary:
     """An identifying echo of the manifest that was run, not its content."""
 
     manifest_version: int
-    path: str | None
+    file_name: str | None
+    sha256: str
     package_count: int
 
 
@@ -116,6 +119,7 @@ def run_manifest(
     ``entry`` are never read to build them.
     """
     started_at = now()
+    started_clock = time.perf_counter()
     entries: list[EntryReport] = []
     status = "completed"
     failed_entry: str | None = None
@@ -146,16 +150,47 @@ def run_manifest(
         report_version=REPORT_VERSION,
         manifest=ManifestSummary(
             manifest_version=manifest.manifest_version,
-            path=manifest_path,
+            file_name=_manifest_file_name(manifest_path),
+            sha256=_manifest_sha256(manifest),
             package_count=len(manifest.entries),
         ),
         started_at=started_at,
         finished_at=finished_at,
-        duration_seconds=(finished_at - started_at).total_seconds(),
+        duration_seconds=time.perf_counter() - started_clock,
         status=status,
         failed_entry=failed_entry,
         entries=tuple(entries),
     )
+
+
+def _manifest_file_name(path: str | None) -> str | None:
+    """Keep report provenance useful without exposing a private absolute path."""
+    if path is None:
+        return None
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or None
+
+
+def _manifest_sha256(manifest: Manifest) -> str:
+    """Fingerprint the complete validated manifest without echoing its metadata."""
+    document = {
+        "manifest_version": manifest.manifest_version,
+        "packages": [
+            {
+                "order": entry.order,
+                "source_package_id": entry.source_package_id,
+                "notice_count_observed": entry.notice_count_observed,
+                "compressed_bytes_observed": entry.compressed_bytes_observed,
+                "observed_at": entry.observed_at.isoformat(),
+                "purpose": entry.purpose,
+            }
+            for entry in manifest.entries
+        ],
+    }
+    payload = json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _result_entry(entry: ManifestEntry, result: IngestResult) -> EntryReport:
@@ -196,7 +231,8 @@ def report_to_dict(report: ManifestReport) -> dict:
         "report_version": report.report_version,
         "manifest": {
             "manifest_version": report.manifest.manifest_version,
-            "path": report.manifest.path,
+            "file_name": report.manifest.file_name,
+            "sha256": report.manifest.sha256,
             "package_count": report.manifest.package_count,
         },
         "started_at": report.started_at.isoformat(),

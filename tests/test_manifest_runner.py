@@ -4,6 +4,7 @@ every Search API call from a scripted transport.
 """
 
 import datetime as dt
+import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,7 +28,7 @@ from tender_ledger.config import load_config
 from tender_ledger.download import DownloadBudgets
 from tender_ledger.ingest import ingest_package
 from tender_ledger.manifest import Manifest, ManifestEntry
-from tender_ledger.manifest_runner import ManifestReport, run_manifest
+from tender_ledger.manifest_runner import ManifestReport, report_to_dict, run_manifest
 
 DAILY_OJS = "220/2023"
 
@@ -228,7 +229,8 @@ class FullManifestTests(ManifestRunnerTestCase):
         self.assertIsNone(report.failed_entry)
         self.assertEqual(report.manifest.manifest_version, 1)
         self.assertEqual(report.manifest.package_count, 5)
-        self.assertEqual(report.manifest.path, "manifests/m3-pilot.json")
+        self.assertEqual(report.manifest.file_name, "m3-pilot.json")
+        self.assertEqual(len(report.manifest.sha256), 64)
         self.assertLessEqual(report.started_at, report.finished_at)
         self.assertGreaterEqual(report.duration_seconds, 0)
         self.assertEqual(len(report.entries), 5)
@@ -476,10 +478,20 @@ class PlanningMetadataIsInertTests(ManifestRunnerTestCase):
 
 
 class ReportShapeTests(ManifestRunnerTestCase):
-    def test_a_manifest_with_no_path_reports_none(self):
+    def test_a_manifest_with_no_path_reports_no_file_name(self):
         self.add_fixture("daily/202300220", [legacy_member(1)], daily_source([1]))
         report = self.run_manifest(_manifest(["daily/202300220"]))
-        self.assertIsNone(report.manifest.path)
+        self.assertIsNone(report.manifest.file_name)
+
+    def test_an_absolute_manifest_path_is_not_exposed(self):
+        self.add_fixture("daily/202300220", [legacy_member(1)], daily_source([1]))
+        report = self.run_manifest(
+            _manifest(["daily/202300220"]),
+            manifest_path="C:\\Users\\someone\\private\\pilot.json",
+        )
+        payload = report_to_dict(report)
+        self.assertEqual(payload["manifest"]["file_name"], "pilot.json")
+        self.assertNotIn("Users", json.dumps(payload))
 
     def test_a_replay_does_not_leave_a_dangling_error(self):
         self.add_fixture("daily/202300220", [legacy_member(1)], daily_source([1]))

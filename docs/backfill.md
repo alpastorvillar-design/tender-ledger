@@ -60,11 +60,12 @@ missing key, an empty package list, a non-canonical identity, a duplicate
 identity, an `order` that does not match its position, and a wrong type
 anywhere.
 
-The planning metadata is carried through to the report unread by any
-decision. Nothing compares it against what a run observes; changing it changes
-nothing about which packages run, in what order, or with what result. It
-exists so a manifest is self-describing without becoming a second source of
-truth about outcomes -- `manifests/m3-pilot.json`'s counts and bytes are the
+The planning metadata remains in the manifest and is covered by its report
+digest, but is not copied into each result row or read by any decision. Nothing
+compares it against what a run observes; changing it changes nothing about
+which packages run, in what order, or with what result. It exists so a manifest
+is self-describing without becoming a second source of truth about outcomes --
+`manifests/m3-pilot.json`'s counts and bytes are the
 `P2_M3_CONTRACT.md` planning numbers, current as of the date recorded, and nothing
 downstream treats them as a target, a gate, or evidence that a download
 happened.
@@ -111,8 +112,8 @@ JSON, written to stdout or to `--report PATH` -- never both, and never split
 across the two. It carries:
 
 * `report_version`, and an echo of which manifest ran (`manifest_version`,
-  the path passed on the command line, and how many packages it named) --
-  not a copy of the manifest's own content;
+  file name, SHA-256 of its validated content, and package count) -- not a copy
+  of the manifest's own content or an absolute private path;
 * `started_at`, `finished_at`, `duration_seconds`;
 * `status` (`"completed"` or `"failed"`) and `failed_entry`, the identity that
   stopped the run, or `null`;

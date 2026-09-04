@@ -45,8 +45,8 @@ class ManifestEntry:
     """One package the manifest names, plus the planning metadata beside it.
 
     ``notice_count_observed``, ``compressed_bytes_observed``, ``observed_at``
-    and ``purpose`` are carried through only to be echoed in a report; they are
-    never compared against what a run actually observes.
+    and ``purpose`` describe the manifest and are never compared against what a
+    run actually observes.
     """
 
     order: int
