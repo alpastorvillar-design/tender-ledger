@@ -37,7 +37,11 @@ _NOTICE_COLUMNS = (
     "source_format", "schema_version", "source_filename", "notice_uuid",
     "notice_version", "publication_date", "publication_date_raw", "dispatch_date",
     "dispatch_date_raw", "buyer_country", "buyer_country_iso", "buyer_country_status",
-    "primary_cpv", "primary_cpv_status", "additional_cpv",
+    "primary_cpv", "primary_cpv_status", "additional_cpv", "change_reference_status",
+)
+
+_CHANGE_REFERENCE_COLUMNS = (
+    "capture_id", "publication_year", "publication_number", "ordinal", "value", "scheme_name",
 )
 
 _RESUMABLE_STATUSES = ("acquiring", "loading", "loaded")
@@ -85,6 +89,8 @@ class ReconcileResult:
     loaded_row_count: int
     member_count: int
     distinct_notice_count: int
+    projected_reference_count: int
+    persisted_reference_count: int
 
 
 def require_transaction_owner(conn: psycopg.Connection) -> None:
@@ -311,7 +317,17 @@ def _row_tuple(capture_id: int, batch_ordinal: int, n: ProjectedNotice) -> tuple
         n.primary_cpv,
         n.primary_cpv_status,
         list(n.additional_cpv),
+        n.change_reference_status,
     )
+
+
+def _change_reference_rows(capture_id: int, notices: Sequence[ProjectedNotice]):
+    for notice in notices:
+        for ref in notice.change_references:
+            yield (
+                capture_id, notice.key.year, notice.key.number,
+                ref.ordinal, ref.value, ref.scheme_name,
+            )
 
 
 def load_batch(
@@ -320,17 +336,26 @@ def load_batch(
     batch_ordinal: int,
     notices: Sequence[ProjectedNotice],
 ) -> None:
-    """Load one deterministic batch: COPY the rows and record the batch in one
-    transaction. A duplicate canonical identity violates the notice primary key,
-    the transaction rolls back, and the caller fails the capture."""
+    """Load one deterministic batch: COPY the notice rows, COPY their change
+    references, and record the batch, all in one transaction. A duplicate
+    canonical identity or an invalid reference violates a constraint, the whole
+    transaction rolls back, and the caller fails the capture -- a notice can
+    never be published without the references it was projected with, or the
+    reverse."""
     require_transaction_owner(conn)
     columns = ", ".join(_NOTICE_COLUMNS)
+    reference_columns = ", ".join(_CHANGE_REFERENCE_COLUMNS)
     lo = notices[0].source_filename if notices else ""
     hi = notices[-1].source_filename if notices else ""
     with conn.transaction(), conn.cursor() as cur:
         with cur.copy(f"copy tl_work.notice_capture ({columns}) from stdin") as copy:
             for notice in notices:
                 copy.write_row(_row_tuple(capture_id, batch_ordinal, notice))
+        with cur.copy(
+            f"copy tl_work.notice_change_reference ({reference_columns}) from stdin"
+        ) as copy:
+            for row in _change_reference_rows(capture_id, notices):
+                copy.write_row(row)
         cur.execute(
             "insert into tl_work.capture_batch"
             " (capture_id, batch_ordinal, member_lo, member_hi, row_count)"
@@ -349,14 +374,30 @@ def reconcile(
     capture_id: int,
     member_count: int,
     distinct_notice_count: int,
+    change_reference_count: int = 0,
 ) -> ReconcileResult:
+    """Confirm the archive loaded completely, including its change references.
+
+    ``change_reference_count`` is the loader's own running total, accumulated
+    while streaming (one integer, not the referenced values themselves) --
+    never inferred from ``COPY`` merely not raising. It is compared against an
+    independent ``count(*)`` of what actually persisted, the same way
+    ``member_count`` is compared against a fresh count of notice rows.
+    """
     require_transaction_owner(conn)
     with conn.transaction():
         loaded = conn.execute(
             "select count(*) from tl_work.notice_capture where capture_id = %s",
             (capture_id,),
         ).fetchone()[0]
-        ok = loaded == distinct_notice_count == member_count
+        persisted_references = conn.execute(
+            "select count(*) from tl_work.notice_change_reference where capture_id = %s",
+            (capture_id,),
+        ).fetchone()[0]
+        ok = (
+            loaded == distinct_notice_count == member_count
+            and persisted_references == change_reference_count
+        )
         conn.execute(
             "update tl_work.capture"
             " set member_count = %s, distinct_notice_count = %s, loaded_row_count = %s,"
@@ -365,7 +406,10 @@ def reconcile(
             " where capture_id = %s",
             (member_count, distinct_notice_count, loaded, ok, capture_id),
         )
-    return ReconcileResult(ok, loaded, member_count, distinct_notice_count)
+    return ReconcileResult(
+        ok, loaded, member_count, distinct_notice_count,
+        change_reference_count, persisted_references,
+    )
 
 
 def publish(

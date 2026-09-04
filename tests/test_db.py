@@ -6,6 +6,7 @@ volume. If the server is unreachable the module skips with a clear message
 rather than passing silently.
 """
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,7 +28,7 @@ from tender_ledger.config import load_config
 from tender_ledger.db import repository as repo
 from tender_ledger.loader import _is_transient, digest_archive, load_package
 from tender_ledger.packages import stream_notices
-from tender_ledger.projection import project_member
+from tender_ledger.projection import ChangeReference, project_member
 
 
 def setUpModule():
@@ -590,6 +591,215 @@ class RecoveryEquivalenceTests(LoaderTestCase):
         self.assertEqual(clean_rows, resumed_rows)
 
 
+class ChangeReferenceProjectionLoadTests(LoaderTestCase):
+    """Contract v2: references are projected, persisted, and readable per notice."""
+
+    def reference_rows(self, capture_id, conn=None):
+        return _reference_rows(conn or self.conn, capture_id)
+
+    def test_a_notice_with_references_persists_them_in_document_order(self):
+        pkg = self.package("refs", [
+            eforms_member(1, change_refs=[("00099-2020", "notice-id-ref"), ("uid/02", None)]),
+            eforms_member(2),  # no references: absent
+            legacy_member(3),  # legacy: not_applicable
+        ])
+        result = load_package(self.conn, pkg, "daily/refs")
+        self.assertEqual(result.status, "published")
+
+        statuses = dict(self.conn.execute(
+            "select publication_number, change_reference_status"
+            " from tl_work.notice_capture where capture_id = %s",
+            (result.capture_id,),
+        ))
+        self.assertEqual(statuses, {1: "present", 2: "absent", 3: "not_applicable"})
+        rows = self.reference_rows(result.capture_id)
+        self.assertEqual(
+            [(r[2], r[3], r[4]) for r in rows if r[1] == 1],
+            [(0, "00099-2020", "notice-id-ref"), (1, "uid/02", None)],
+        )
+
+    def test_the_history_view_exposes_change_reference_status(self):
+        pkg = self.package("refs", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        result = load_package(self.conn, pkg, "daily/refhist")
+        row = self.conn.execute(
+            "select change_reference_status from tl_read.notice_history"
+            " where capture_id = %s and publication_number = 1",
+            (result.capture_id,),
+        ).fetchone()
+        self.assertEqual(row[0], "present")
+
+    def test_the_reference_history_view_has_one_row_per_reference(self):
+        pkg = self.package("refs", [
+            eforms_member(1, change_refs=[("00099-2020", "notice-id-ref"), ("uid/02", None)]),
+        ])
+        result = load_package(self.conn, pkg, "daily/refhist2")
+        rows = self.conn.execute(
+            "select ordinal, value, scheme_name from tl_read.notice_change_reference_history"
+            " where capture_id = %s order by ordinal",
+            (result.capture_id,),
+        ).fetchall()
+        self.assertEqual(rows, [(0, "00099-2020", "notice-id-ref"), (1, "uid/02", None)])
+
+    def test_the_reader_cannot_select_the_change_reference_table_directly(self):
+        pkg = self.package("refs", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        load_package(self.conn, pkg, "daily/refperm")
+        reader = self.new_conn()
+        reader.execute("set role tender_ledger_reader")
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            reader.execute("select * from tl_work.notice_change_reference")
+
+
+class ChangeReferenceAtomicityTests(LoaderTestCase):
+    """A batch's notice rows and its reference rows commit or roll back together."""
+
+    def test_an_invalid_reference_rolls_back_the_whole_batch(self):
+        pkg = self.package("bad", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        rows = projected_rows(pkg)
+        invalid = dataclasses.replace(
+            rows[0],
+            change_reference_status="present",
+            change_references=(ChangeReference(0, "", None),),
+        )
+        sha, size = _digest(pkg)
+        writer = self.new_conn()
+        begin = repo.begin_capture(writer, "daily/badref", sha, size, batch_size=10)
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            repo.load_batch(writer, begin.capture.capture_id, 0, [invalid])
+
+        seen = self.new_conn()
+        self.assertEqual(
+            seen.execute(
+                "select"
+                " (select count(*) from tl_work.capture_batch where capture_id = %s),"
+                " (select count(*) from tl_work.notice_capture where capture_id = %s),"
+                " (select count(*) from tl_work.notice_change_reference where capture_id = %s)",
+                (begin.capture.capture_id,) * 3,
+            ).fetchone(),
+            (0, 0, 0),
+        )
+
+    def test_deleting_an_uncommitted_notice_takes_its_references_with_it(self):
+        # clear_uncommitted_rows only targets tl_work.notice_capture; the
+        # foreign key's ON DELETE CASCADE is what removes the orphaned
+        # reference rather than a second, easily-forgotten DELETE.
+        pkg = self.package("refs", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        writer = self.new_conn()
+        sha, size = _digest(pkg)
+        begin = repo.begin_capture(writer, "daily/orphan", sha, size, batch_size=10)
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg))
+        self.assertEqual(len(self.reference_rows(begin.capture.capture_id, writer)), 1)
+
+        deleted = repo.clear_uncommitted_rows(writer, begin.capture.capture_id)
+        self.assertEqual(deleted, 0)  # the batch above is already committed
+
+        # Force an uncommitted row directly to exercise the cascade in isolation.
+        writer.execute(
+            "insert into tl_work.notice_capture"
+            " (capture_id, publication_year, publication_number, batch_ordinal,"
+            "  source_format, schema_version, source_filename, publication_date,"
+            "  publication_date_raw, buyer_country_status, primary_cpv_status,"
+            "  change_reference_status)"
+            " values (%s, 2099, 999, 5, 'legacy', 'R2.0.9', 'x.xml', '2020-01-01',"
+            " '20200101', 'absent', 'absent', 'not_applicable')",
+            (begin.capture.capture_id,),
+        )
+        writer.execute(
+            "insert into tl_work.notice_change_reference"
+            " (capture_id, publication_year, publication_number, ordinal, value)"
+            " values (%s, 2099, 999, 0, 'orphan-ref')",
+            (begin.capture.capture_id,),
+        )
+        deleted = repo.clear_uncommitted_rows(writer, begin.capture.capture_id)
+        self.assertEqual(deleted, 1)
+        self.assertEqual(
+            writer.execute(
+                "select count(*) from tl_work.notice_change_reference"
+                " where capture_id = %s and publication_number = 999",
+                (begin.capture.capture_id,),
+            ).fetchone()[0],
+            0,
+        )
+        # the earlier, genuinely committed reference is untouched
+        self.assertEqual(len(self.reference_rows(begin.capture.capture_id, writer)), 1)
+
+    def reference_rows(self, capture_id, conn=None):
+        return _reference_rows(conn or self.conn, capture_id)
+
+
+class ReconciliationReferenceCountTests(LoaderTestCase):
+    """reconcile() checks an independent persisted count, not just that COPY ran."""
+
+    def test_a_reference_count_mismatch_fails_reconciliation(self):
+        pkg = self.package("refs", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        writer = self.new_conn()
+        sha, size = _digest(pkg)
+        begin = repo.begin_capture(writer, "daily/mismatch", sha, size, batch_size=10)
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg))
+
+        result = repo.reconcile(
+            writer, begin.capture.capture_id, 1, 1, change_reference_count=2
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.persisted_reference_count, 1)
+        self.assertEqual(
+            self.capture_status(begin.capture.capture_id, writer), "loading"
+        )  # never promoted to 'loaded' on a mismatch
+
+    def test_a_matching_reference_count_reconciles(self):
+        pkg = self.package("refs", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        writer = self.new_conn()
+        sha, size = _digest(pkg)
+        begin = repo.begin_capture(writer, "daily/matched", sha, size, batch_size=10)
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg))
+
+        result = repo.reconcile(
+            writer, begin.capture.capture_id, 1, 1, change_reference_count=1
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.persisted_reference_count, 1)
+
+
+class ChangeReferenceRecoveryTests(LoaderTestCase):
+    """Recovery reproduces the same reference rows as a clean run, not just the
+    same notice rows."""
+
+    def _cancel_before(self, ordinal):
+        original = repo.load_batch
+
+        def load_batch(conn, capture_id, batch_ordinal, notices):
+            if batch_ordinal == ordinal:
+                conn.execute("set statement_timeout = '10ms'")
+                try:
+                    conn.execute("select pg_sleep(0.5)")
+                finally:
+                    conn.execute("set statement_timeout = 0")
+            return original(conn, capture_id, batch_ordinal, notices)
+
+        return mock.patch.object(repo, "load_batch", side_effect=load_batch)
+
+    def test_a_cancelled_batch_leaves_no_references_without_a_committed_batch(self):
+        members = [eforms_member(100 + i, change_refs=[(f"ref-{i}-2020", None)])
+                   for i in range(5)]
+        pkg = self.package("t", members)
+        with self._cancel_before(1):
+            interrupted = load_package(self.new_conn(), pkg, "daily/refcancel", batch_size=2)
+        self.assertEqual(interrupted.status, "loading")
+        # exactly one committed batch's worth of references survive the cancel
+        self.assertEqual(len(_reference_rows(self.conn, interrupted.capture_id)), 2)
+
+        retry = load_package(self.new_conn(), pkg, "daily/refcancel", batch_size=2)
+        self.assertEqual(retry.status, "published")
+
+        clean = load_package(self.new_conn(), pkg, "daily/refclean", batch_size=2)
+        self.assertEqual(
+            _reference_rows(self.conn, retry.capture_id),
+            _reference_rows(self.conn, clean.capture_id),
+        )
+        self.assertEqual(
+            _notice_rows(self.conn, retry.capture_id), _notice_rows(self.conn, clean.capture_id)
+        )
+
+
 class MigrationUpgradeTests(unittest.TestCase):
     """Clean install applies every migration; upgrading from 0001 keeps captures."""
 
@@ -641,7 +851,10 @@ class MigrationUpgradeTests(unittest.TestCase):
 
         self.assertEqual(
             db.migrate(self.conn),
-            ["0002_capture_batch_size", "0003_source_verification", "0004_package_ingest"],
+            [
+                "0002_capture_batch_size", "0003_source_verification",
+                "0004_package_ingest", "0005_projection_contract_v2",
+            ],
         )
 
         row = self.conn.execute(
@@ -651,9 +864,10 @@ class MigrationUpgradeTests(unittest.TestCase):
         self.assertEqual(row, ("published", True, 1, None, None))
         self.assertEqual(
             self.conn.execute(
-                "select publication_ref from tl_read.notice where source_package_id = 'daily/old'"
-            ).fetchone()[0],
-            "995-2020",
+                "select publication_ref, change_reference_status from tl_read.notice"
+                " where source_package_id = 'daily/old'"
+            ).fetchone(),
+            ("995-2020", None),
         )
 
     def test_upgrade_from_0002_keeps_the_capture_and_adds_verification(self):
@@ -682,7 +896,8 @@ class MigrationUpgradeTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            db.migrate(self.conn), ["0003_source_verification", "0004_package_ingest"]
+            db.migrate(self.conn),
+            ["0003_source_verification", "0004_package_ingest", "0005_projection_contract_v2"],
         )
 
         self.assertEqual(
@@ -707,6 +922,74 @@ class MigrationUpgradeTests(unittest.TestCase):
             0,
         )
 
+    def test_upgrade_from_0004_leaves_a_v1_capture_with_no_reference_status(self):
+        self.assertEqual(
+            db.migrate(self.conn, up_to="0004_package_ingest"),
+            [
+                "0001_core", "0002_capture_batch_size",
+                "0003_source_verification", "0004_package_ingest",
+            ],
+        )
+        capture_id = self.conn.execute(
+            "insert into tl_work.capture (source_package_id, artifact_sha256, artifact_bytes,"
+            " contract_version, status, member_count, distinct_notice_count, loaded_row_count,"
+            " batch_size) values ('daily/202300220', 'abc123', 100, '1', 'published', 1, 1, 1, 500)"
+            " returning capture_id"
+        ).fetchone()[0]
+        self.conn.execute(
+            "insert into tl_work.notice_capture (capture_id, publication_year, publication_number,"
+            " batch_ordinal, source_format, schema_version, source_filename, publication_date,"
+            " publication_date_raw, buyer_country_status, primary_cpv_status)"
+            " values (%s, 2023, 694329, 0, 'eforms', 'eforms-sdk-1.9', '694329_2023.xml',"
+            " '2023-11-15', '2023-11-15Z', 'absent', 'absent')",
+            (capture_id,),
+        )
+        self.conn.execute(
+            "insert into tl_work.published_capture (source_package_id, capture_id)"
+            " values ('daily/202300220', %s)",
+            (capture_id,),
+        )
+
+        self.assertEqual(db.migrate(self.conn), ["0005_projection_contract_v2"])
+
+        # NULL, not backfilled to 'absent': the v1 row was never projected under
+        # contract v2, so nothing here should claim it published no references.
+        row = self.conn.execute(
+            "select change_reference_status from tl_work.notice_capture"
+            " where capture_id = %s", (capture_id,)
+        ).fetchone()
+        self.assertIsNone(row[0])
+        self.assertEqual(
+            self.conn.execute(
+                "select publication_ref, change_reference_status from tl_read.notice"
+                " where source_package_id = 'daily/202300220'"
+            ).fetchone(),
+            ("694329-2023", None),
+        )
+        # complete-history surfaces exist and agree
+        self.assertEqual(
+            self.conn.execute(
+                "select change_reference_status from tl_read.notice_history"
+                " where capture_id = %s", (capture_id,)
+            ).fetchone(),
+            (None,),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "select count(*) from tl_read.notice_change_reference_history"
+                " where capture_id = %s", (capture_id,)
+            ).fetchone()[0],
+            0,
+        )
+        reader = db.connect(load_config(dbname=self.UPGRADE_DB))
+        self.addCleanup(reader.close)
+        reader.execute("set role tender_ledger_reader")
+        self.assertEqual(
+            reader.execute("select count(*) from tl_read.notice_history").fetchone()[0], 1
+        )
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            reader.execute("select * from tl_work.notice_change_reference")
+
     def test_clean_install_applies_every_migration(self):
         applied = db.migrate(self.conn)
         self.assertEqual(
@@ -714,6 +997,7 @@ class MigrationUpgradeTests(unittest.TestCase):
             [
                 "0001_core", "0002_capture_batch_size",
                 "0003_source_verification", "0004_package_ingest",
+                "0005_projection_contract_v2",
             ],
         )
         self.assertIn(
@@ -732,6 +1016,23 @@ class MigrationUpgradeTests(unittest.TestCase):
             ).fetchone()[0],
             True,
         )
+        self.assertEqual(
+            self.conn.execute(
+                "select to_regclass('tl_work.notice_change_reference') is not null"
+            ).fetchone()[0],
+            True,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "select to_regclass('tl_read.notice_history') is not null,"
+                " to_regclass('tl_read.notice_change_reference_history') is not null"
+            ).fetchone(),
+            (True, True),
+        )
+
+    def test_reapplying_0005_after_a_clean_install_is_a_no_op(self):
+        db.migrate(self.conn)
+        self.assertEqual(db.migrate(self.conn), [])
 
 
 class ConnectionContractTests(LoaderTestCase):
@@ -973,8 +1274,18 @@ def _notice_rows(conn, capture_id):
         "select publication_year, publication_number, source_format, schema_version,"
         " source_filename, publication_date, dispatch_date, buyer_country,"
         " buyer_country_iso, buyer_country_status, primary_cpv, primary_cpv_status,"
-        " additional_cpv from tl_work.notice_capture where capture_id = %s"
+        " additional_cpv, change_reference_status"
+        " from tl_work.notice_capture where capture_id = %s"
         " order by publication_year, publication_number",
+        (capture_id,),
+    ).fetchall()
+
+
+def _reference_rows(conn, capture_id):
+    return conn.execute(
+        "select publication_year, publication_number, ordinal, value, scheme_name"
+        " from tl_work.notice_change_reference where capture_id = %s"
+        " order by publication_year, publication_number, ordinal",
         (capture_id,),
     ).fetchall()
 

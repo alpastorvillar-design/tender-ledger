@@ -951,33 +951,46 @@ class MigrationUpgradeTests(unittest.TestCase):
             db.migrate(self.conn, up_to="0003_source_verification"),
             ["0001_core", "0002_capture_batch_size", "0003_source_verification"],
         )
-        path = write_package(
-            Path(self.tmp.name) / "d.tar.gz", [legacy_member(n) for n in (1, 2, 3, 4)]
+        # A capture and a verified coverage attempt exactly as 0003-era code
+        # would have written them -- loaded and verified directly, with no
+        # ingest_run in sight, because 0004 has not even been migrated yet.
+        capture_id = self.conn.execute(
+            "insert into tl_work.capture (source_package_id, artifact_sha256, artifact_bytes,"
+            " contract_version, status, member_count, distinct_notice_count,"
+            " loaded_row_count, batch_size, coverage_verified)"
+            " values (%s, 'abc123', 100, '1', 'published', 4, 4, 4, 2, true)"
+            " returning capture_id",
+            (PACKAGE,),
+        ).fetchone()[0]
+        for n in (1, 2, 3, 4):
+            self.conn.execute(
+                "insert into tl_work.notice_capture (capture_id, publication_year,"
+                " publication_number, batch_ordinal, source_format, schema_version,"
+                " source_filename, publication_date, publication_date_raw,"
+                " buyer_country_status, primary_cpv_status)"
+                " values (%s, 2023, %s, 0, 'legacy', 'R2.0.9', %s, '2023-11-15',"
+                " '20231115', 'absent', 'absent')",
+                (capture_id, n, f"{n}_2023.xml"),
+            )
+        self.conn.execute(
+            "insert into tl_work.published_capture (source_package_id, capture_id)"
+            " values (%s, %s)", (PACKAGE, capture_id),
         )
-        loaded = load_package(self.conn, path, PACKAGE, batch_size=2)
-        verified = verify_capture(
-            self.conn, loaded.capture_id, transport=FakeTransport(source([1, 2, 3, 4]))
+        self.conn.execute(
+            "insert into tl_work.verification_attempt (capture_id, artifact_sha256,"
+            " contract_version, verifier_version, query_text, query_scope, state,"
+            " announced_total, api_record_count, api_distinct_count, api_duplicate_count,"
+            " local_distinct_count, only_local_count, only_api_count, api_keys_sha256,"
+            " key_digest_recipe, finished_at)"
+            " values (%s, 'abc123', '1', 'test', 'OJ = 220/2023', 'ALL', 'verified',"
+            " 4, 4, 4, 0, 4, 0, 0, 'digest', 'test', now())",
+            (capture_id,),
         )
-        self.assertEqual(verified.state, "verified")
-        before = self.conn.execute(
-            "select count(*), (select count(*) from tl_work.capture_batch),"
-            " (select capture_id from tl_work.published_capture where source_package_id = %s)"
-            " from tl_work.notice_capture", (PACKAGE,)
-        ).fetchone()
-
-        self.assertEqual(db.migrate(self.conn), ["0004_package_ingest"])
 
         self.assertEqual(
-            self.conn.execute(
-                "select count(*), (select count(*) from tl_work.capture_batch),"
-                " (select capture_id from tl_work.published_capture where source_package_id = %s)"
-                " from tl_work.notice_capture", (PACKAGE,)
-            ).fetchone(),
-            before,
+            db.migrate(self.conn), ["0004_package_ingest", "0005_projection_contract_v2"]
         )
-        self.assertEqual(before[0], 4)
-        self.assertEqual(before[1], 2)
-        # verified before 0004 existed: no download ever happened, so no checkpoint
+
         row = self.conn.execute(
             "select has_checkpoint, checkpoint_is_current, coverage_verified"
             " from tl_read.package_ingest_status where source_package_id = %s", (PACKAGE,)
@@ -989,6 +1002,14 @@ class MigrationUpgradeTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+        # this legacy capture predates contract v2: NULL, never backfilled
+        self.assertEqual(
+            self.conn.execute(
+                "select distinct change_reference_status from tl_work.notice_capture"
+                " where capture_id = %s", (capture_id,)
+            ).fetchall(),
+            [(None,)],
+        )
 
     def test_a_clean_install_applies_every_migration(self):
         self.assertEqual(
@@ -996,6 +1017,7 @@ class MigrationUpgradeTests(unittest.TestCase):
             [
                 "0001_core", "0002_capture_batch_size",
                 "0003_source_verification", "0004_package_ingest",
+                "0005_projection_contract_v2",
             ],
         )
 

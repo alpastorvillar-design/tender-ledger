@@ -164,6 +164,7 @@ def _load_capture(
 
     member_count = 0
     distinct_keys: set[tuple[int, int]] = set()
+    change_reference_count = 0
     batch: list = []
     ordinal = 0
     try:
@@ -171,6 +172,7 @@ def _load_capture(
             member_count += 1
             projected = project_member(member)
             distinct_keys.add((projected.key.year, projected.key.number))
+            change_reference_count += len(projected.change_references)
             batch.append(projected)
             if len(batch) >= effective_batch_size:
                 if ordinal not in done:
@@ -187,12 +189,14 @@ def _load_capture(
             raise PackageError("archive changed during load")
 
         result = repo.reconcile(
-            conn, capture.capture_id, member_count, len(distinct_keys)
+            conn, capture.capture_id, member_count, len(distinct_keys), change_reference_count
         )
         if not result.ok:
             raise PackageError(
                 f"reconciliation failed: members={member_count}"
                 f" distinct={len(distinct_keys)} loaded={result.loaded_row_count}"
+                f" references={change_reference_count}"
+                f" persisted_references={result.persisted_reference_count}"
             )
     except (PackageError, psycopg.Error) as exc:
         detail = f"{type(exc).__name__}: {exc}"

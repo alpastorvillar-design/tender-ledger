@@ -98,10 +98,26 @@ def padded_legacy_member(number, *, member_bytes, year=2023, **kwargs):
 _UNSET = object()
 
 
+def _change_reference_element(value, scheme):
+    attr = f' schemeName="{scheme}"' if scheme else ""
+    text = value or ""
+    return f"<efbc:ChangedNoticeIdentifier{attr}>{text}</efbc:ChangedNoticeIdentifier>"
+
+
+def _change_references_xml(change_refs):
+    """``change_refs``: an iterable of (value, scheme_name) pairs. ``value`` may
+    be ``""`` or ``None`` to emit an empty element (whitespace-only text)."""
+    if not change_refs:
+        return ""
+    items = "".join(_change_reference_element(value, scheme) for value, scheme in change_refs)
+    return f"<efac:Changes>{items}</efac:Changes>"
+
+
 def eforms_member(number, year=2023, *, customization="eforms-sdk-1.9",
                   pub_date="2023-11-15Z", issue_date="2023-11-14+01:00",
                   version_id="01", buyer_country="DEU", buyer_ref=_UNSET,
-                  orgs=None, main_cpv="72000000", extra_cpv=("72100000",)):
+                  orgs=None, main_cpv="72000000", extra_cpv=("72100000",),
+                  change_refs=()):
     """A synthetic eForms notice.
 
     ``orgs`` is a list of (organisation id, country) pairs; the default is a
@@ -156,6 +172,7 @@ def eforms_member(number, year=2023, *, customization="eforms-sdk-1.9",
         f"<efac:Organizations>{organizations}</efac:Organizations>"
         f"<efac:Publication><efbc:NoticePublicationID>{int(number):08d}-{year}</efbc:NoticePublicationID>"
         f"{pub_date_el}</efac:Publication>"
+        f"{_change_references_xml(change_refs)}"
         "</EformsExtension></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>"
         f"<cbc:CustomizationID>{customization}</cbc:CustomizationID>"
         '<cbc:ID schemeName="notice-id">d758d45a-515d-4b92-b441-14c985063716</cbc:ID>'
