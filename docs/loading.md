@@ -79,8 +79,12 @@ the archive the same way even if `--batch-size` changes. Migration `0003` adds
 the coverage attempt history behind `source_coverage_verified`. Migration `0004`
 adds the ingest runs and the package checkpoint described in
 [ingestion.md](ingestion.md), and the composite unique constraints its foreign
-keys point at; captures, batches, notices and the published pointer are
-unchanged by it.
+keys point at. Migration `0005` (`contract_version = 2`) adds
+`change_reference_status` to `notice_capture` (NULL for rows loaded before it -
+"not projected under this contract", never backfilled to `absent`) and the
+`tl_work.notice_change_reference` child table described below, plus the two
+complete-history views; captures, batches, notices and the published pointer
+are otherwise unchanged by it.
 
 * `tl_read.notice` - one row per published notice per source package. Daily and
   monthly packages overlap, so a canonical identity can appear more than once
@@ -93,6 +97,43 @@ unchanged by it.
   captures stay internal.
 * `tl_read.verification_attempt` - one row per coverage verification attempt.
   See [verification.md](verification.md).
+* `tl_read.notice_history` / `tl_read.notice_change_reference_history` - the
+  complete-capture surfaces described below.
+
+### Official change references (`tl_work.notice_change_reference`)
+
+One row per `efbc:ChangedNoticeIdentifier` occurrence (see
+[projection.md](projection.md)), keyed by `(capture_id, publication_year,
+publication_number, ordinal)` and foreign-keyed to its notice's row in
+`notice_capture` with `on delete cascade`. That cascade is what lets
+`clear_uncommitted_rows` remove an uncommitted notice's references without a
+second, easily-forgotten `DELETE`: it only ever targets `notice_capture`
+directly.
+
+`load_batch` `COPY`s a batch's notice rows and its change-reference rows in the
+same transaction as the `capture_batch` record, so a constraint violation on
+either table rolls all three back together — a notice can never be published
+without the references it was projected with, or the reverse. `reconcile` then
+compares an independently accumulated reference count (a running integer kept
+while streaming, not the referenced values themselves — see
+[scale-and-sql.md](scale-and-sql.md) for the memory discussion) against a fresh
+`count(*)` of what actually persisted, the same way it already compared
+`member_count` against a fresh count of notice rows. Trusting that `COPY` did
+not raise is not treated as proof that its row count is what was intended.
+
+### Complete capture history
+
+`tl_read.notice` and `tl_read.distinct_notice` only ever show the currently
+published capture of a package. `tl_read.notice_history` (one row per notice)
+and `tl_read.notice_change_reference_history` (one row per reference) instead
+show every **complete** capture — `published` or `superseded` — and hide
+`acquiring`, `loading`, `loaded` and `failed` ones exactly as `tl_read.notice`
+already hides everything but the published pointer. A superseded capture (an
+earlier acquisition a `--force-recapture` replaced) stays queryable through
+these two views; a partial one never becomes visible through any reading
+surface. The two views are never joined directly against each other in a
+single `select`, so a notice's grain in `notice_history` stays one row no
+matter how many references it carries.
 
 ## Guarantees
 

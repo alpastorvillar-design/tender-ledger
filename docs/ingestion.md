@@ -133,6 +133,19 @@ freshness; periodic refresh is an orchestration decision. There is deliberately
 no `--refresh` or `--force` on `ingest`: re-acquisition stays the existing,
 explicit `load --force-recapture`, which correctly retires the checkpoint.
 
+Currency alone is not enough to replay: `tl_read.package_ingest_status` also
+exposes `checkpoint_contract_version` (and `published_contract_version`),
+copied straight from the stored rows. `ingest._replay` compares the checkpoint
+value against the running code's `projection.CONTRACT_VERSION` before trusting
+it — SQL cannot know that constant, and it is deliberately not duplicated as a
+literal there, so there is exactly one place it can drift. A checkpoint sealed
+under an older contract declines, even when it is otherwise internally
+coherent (capture, artifact checksum and attempt all still agree with each
+other): the fresh run this falls through to acquires a *new* capture under the
+current contract rather than resuming or overwriting the old evidence, because
+`load_package` already keys resumption and the "already published" no-op check
+on matching `contract_version`, not only on matching bytes.
+
 ## Package identity
 
 Two identity shapes are supported, and everything else about a package is

@@ -1,6 +1,6 @@
 # Notice projection contract
 
-`contract_version = 1`.
+`contract_version = 2`.
 
 The loader stores a small allow-listed projection of each notice, not the raw
 XML. Fields were derived from a real daily package (2023-11-15) containing legacy
@@ -45,6 +45,37 @@ capture, so there is no partially-populated row.
 for eForms). `buyer_country_iso` is the alpha-2 form for the European codes that
 dominate TED, so country can be a single analytical axis. An unmapped code keeps
 `buyer_country` with status `present` and a null `buyer_country_iso`.
+
+## Official change references (`contract_version = 2`)
+
+An eForms notice may declare that it corrects or supersedes another notice, via
+one or more `efbc:ChangedNoticeIdentifier` elements (located by local name
+under the extension block, not by an exact nested path — see
+`_change_references` in `projection.py`). A real mixed daily package showed
+this is genuinely one-to-many: 217 occurrences across 1,154 eForms notices, two
+of them carrying more than one. It is kept as an ordered, one-to-many relation
+in `tl_work.notice_change_reference` (see [loading](loading.md)), never
+collapsed into a scalar column and never deduplicated — two identical values
+are two references, not one.
+
+Each notice carries a `change_reference_status`:
+
+| Status | Meaning |
+| --- | --- |
+| `present` | At least one `efbc:ChangedNoticeIdentifier`; every occurrence is kept, in document order, with its raw value and optional `schemeName` |
+| `absent` | An eForms notice that published none |
+| `not_applicable` | A legacy notice; the element does not exist in that schema family, and this does not claim a legacy notice never corrected another |
+| `NULL` | Loaded before contract v2; "not projected under this contract", never treated as equivalent to `absent` |
+
+An element that is present but empty or whitespace-only is not downgraded to
+`absent`: it names a value the source claims to have published and did not, so
+the whole member is rejected the same way a missing publication date is.
+Observed value shapes vary (a publication reference, a UUID plus version, or
+other schemes such as `notice-id-ref`/`ojs-notice-id`); the raw value and
+`schemeName` are stored exactly as published, and resolving a reference against
+a loaded identity is a reading-time concern (see
+[`queries/official_change_references.sql`](../queries/official_change_references.sql)),
+not something the projection guesses at.
 
 ## Excluded
 

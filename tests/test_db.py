@@ -800,6 +800,100 @@ class ChangeReferenceRecoveryTests(LoaderTestCase):
         )
 
 
+class CompleteCaptureHistoryTests(LoaderTestCase):
+    """tl_read.notice_history / notice_change_reference_history: published and
+    superseded captures are visible; acquiring, loading, loaded and failed ones
+    are not -- the same exclusion tl_read.notice already applies via the
+    published-only join, extended here to a capture's whole complete history."""
+
+    def history_statuses(self, capture_id):
+        return {
+            r[0]
+            for r in self.conn.execute(
+                "select capture_status from tl_read.notice_history where capture_id = %s",
+                (capture_id,),
+            )
+        }
+
+    def test_a_superseded_capture_stays_visible_with_its_references(self):
+        first = self.package("v1", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        old = load_package(self.conn, first, "daily/history")
+        second = self.package("v2", [eforms_member(1), eforms_member(2)])
+        new = load_package(self.new_conn(), second, "daily/history", force_recapture=True)
+
+        self.assertEqual(self.capture_status(old.capture_id), "superseded")
+        self.assertEqual(self.history_statuses(old.capture_id), {"superseded"})
+        self.assertEqual(self.history_statuses(new.capture_id), {"published"})
+        self.assertEqual(
+            self.conn.execute(
+                "select ordinal, value from tl_read.notice_change_reference_history"
+                " where capture_id = %s", (old.capture_id,)
+            ).fetchall(),
+            [(0, "00099-2020")],
+        )
+        # the superseded capture's own reference did not leak onto the new one
+        self.assertEqual(
+            self.conn.execute(
+                "select count(*) from tl_read.notice_change_reference_history"
+                " where capture_id = %s", (new.capture_id,)
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_an_incomplete_capture_never_appears_in_history(self):
+        pkg = self.package("partial", [legacy_member(1), legacy_member(2)])
+        sha, size = _digest(pkg)
+        writer = self.new_conn()
+        begin = repo.begin_capture(writer, "daily/incomplete", sha, size, batch_size=1)
+        repo.load_batch(writer, begin.capture.capture_id, 0, projected_rows(pkg)[:1])
+        # 'loading': one batch committed, never reconciled or published
+        self.assertEqual(self.history_statuses(begin.capture.capture_id), set())
+
+    def test_a_failed_capture_never_appears_in_history(self):
+        pkg = self.package("dup", [legacy_member(7), eforms_member(7)])
+        result = load_package(self.conn, pkg, "daily/failedhist", batch_size=10)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(self.history_statuses(result.capture_id), set())
+
+    def test_a_notice_with_several_references_is_still_one_history_row(self):
+        pkg = self.package("multi", [
+            eforms_member(1, change_refs=[("00099-2020", None), ("uid/02", "notice-id-ref")]),
+        ])
+        result = load_package(self.conn, pkg, "daily/multirefhist")
+        self.assertEqual(
+            self.conn.execute(
+                "select count(*) from tl_read.notice_history where capture_id = %s",
+                (result.capture_id,),
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "select count(*) from tl_read.notice_change_reference_history"
+                " where capture_id = %s", (result.capture_id,)
+            ).fetchone()[0],
+            2,
+        )
+
+    def test_the_reader_can_query_history_but_not_the_working_tables(self):
+        pkg = self.package("v1", [eforms_member(1, change_refs=[("00099-2020", None)])])
+        old = load_package(self.conn, pkg, "daily/readerhist")
+        pkg2 = self.package("v2", [eforms_member(1)])
+        load_package(self.new_conn(), pkg2, "daily/readerhist", force_recapture=True)
+
+        reader = self.new_conn()
+        reader.execute("set role tender_ledger_reader")
+        self.assertEqual(
+            reader.execute(
+                "select capture_status from tl_read.notice_history where capture_id = %s",
+                (old.capture_id,),
+            ).fetchone()[0],
+            "superseded",
+        )
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            reader.execute("select * from tl_work.notice_capture")
+
+
 class MigrationUpgradeTests(unittest.TestCase):
     """Clean install applies every migration; upgrading from 0001 keeps captures."""
 
