@@ -98,6 +98,13 @@ LEGACY_ROOTS = {
 EFORMS_ROOTS = {
     f"{{urn:oasis:names:specification:ubl:schema:xsd:{name}-2}}{name}"
     for name in ("ContractNotice", "ContractAwardNotice", "PriorInformationNotice")
+} | {
+    # The SDK's fourth notice document, which is not a UBL procurement document
+    # and so carries its own namespace. Added by exact name after a bounded
+    # structural read found one in a real monthly package; every other root,
+    # including a later version of this namespace, stays unsupported.
+    "{http://data.europa.eu/p27/eforms-business-registration-information-notice/1}"
+    "BusinessRegistrationInformationNotice",
 }
 CBC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2}"
 MAX_SCHEMA_VERSION_CHARS = 128

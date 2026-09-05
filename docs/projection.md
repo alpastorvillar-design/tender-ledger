@@ -30,6 +30,25 @@ The eForms buyer organisation is resolved by matching
 `efac:Organizations/efac:Organization` entries; place-of-performance country is
 deliberately ignored.
 
+## Supported roots
+
+Legacy: `TED_EXPORT` in the `R2.0.8` and `R2.0.9` namespaces. eForms: the three
+UBL procurement documents (`ContractNotice`, `ContractAwardNotice`,
+`PriorInformationNotice`) and the SDK's fourth notice document,
+`BusinessRegistrationInformationNotice`, which carries its own namespace rather
+than a UBL one. Each is allow-listed by exact root name; anything else is
+rejected, including another version of the same namespace.
+
+A business registration notice is not a procurement procedure, so it publishes
+no `cac:ContractingParty` and no `cac:ProcurementProject`. It is held to the
+same identifiers as every other eForms notice -- `cbc:CustomizationID`,
+`cbc:ID[@schemeName="notice-id"]` and `efbc:PublicationDate` -- and its buyer
+country, CPV and change references project as `absent`. The parties it does
+carry (a sender, a registered business) are not buyers and are never read as a
+substitute. One real month, `monthly/2023-11`, contained exactly one of these
+among 61,638 members: without the root the whole month is unloadable, and with
+a looser rule any unknown root would be.
+
 ## Absent vs not applicable
 
 `publication_date` is required: a member without it is rejected and the capture

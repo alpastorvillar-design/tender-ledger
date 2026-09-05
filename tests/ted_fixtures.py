@@ -264,3 +264,56 @@ def daily_container(name, members):
     daily package carried inside the month's archive.
     """
     return name, package_bytes(members)
+
+BUSINESS_REGISTRATION_NS = (
+    "http://data.europa.eu/p27/eforms-business-registration-information-notice/1"
+)
+
+
+def business_registration_member(
+    number, year=2023, *, customization="eforms-sdk-1.9", pub_date="2023-11-15Z",
+    issue_date="2023-11-14+01:00", version_id="01", notice_id_scheme="notice-id",
+    notice_id="7de1a5e9-64a4-4a6f-9d5f-2a5d4e0a0f11", namespace=BUSINESS_REGISTRATION_NS,
+):
+    """The SDK's fourth eForms document, as one real notice was observed to be.
+
+    A bounded structural read of ``monthly/2023-11`` recorded, for the single
+    notice of this kind in that month: this root namespace, an
+    ``eforms-sdk-1.9`` CustomizationID, a ``notice-id`` identifier, a VersionID,
+    an IssueDate and an ``efbc:PublicationDate`` -- and no ContractingParty, no
+    Organization, no ProcurementProject and no change reference. The projection
+    is exercised against exactly that: everything the contract cannot resolve
+    stays ``absent`` rather than being filled in from a neighbouring party.
+
+    The probe recorded the qualified names of the elements the contract reads
+    and the local names of the rest, so the sibling below is a deliberately
+    unknown element rather than a claim about what else a real one carries.
+    """
+    identifier = (
+        f'<cbc:ID schemeName="{notice_id_scheme}">{notice_id}</cbc:ID>'
+        if notice_id_scheme is not None
+        else f"<cbc:ID>{notice_id}</cbc:ID>"
+    )
+    customization_el = (
+        f"<cbc:CustomizationID>{customization}</cbc:CustomizationID>"
+        if customization is not None else ""
+    )
+    pub_date_el = f"<efbc:PublicationDate>{pub_date}</efbc:PublicationDate>" if pub_date else ""
+    xml = (
+        f'<BusinessRegistrationInformationNotice xmlns="{namespace}" '
+        'xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" '
+        'xmlns:efac="http://data.europa.eu/p27/eforms-ubl-extension-aggregate-components/1" '
+        'xmlns:efbc="http://data.europa.eu/p27/eforms-ubl-extension-basic-components/1" '
+        'xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">'
+        "<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent><EformsExtension "
+        'xmlns="http://data.europa.eu/p27/eforms-ubl-extensions/1">'
+        f"<efac:Publication><efbc:NoticePublicationID>{int(number):08d}-{year}"
+        f"</efbc:NoticePublicationID>{pub_date_el}</efac:Publication>"
+        "</EformsExtension></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>"
+        f"{customization_el}{identifier}"
+        f"<cbc:VersionID>{version_id}</cbc:VersionID>"
+        f"<cbc:IssueDate>{issue_date}</cbc:IssueDate>"
+        "<Unknown>ignored by the projection</Unknown>"
+        "</BusinessRegistrationInformationNotice>"
+    )
+    return f"{year}-220/{int(number):08d}_{year}.xml", xml.encode("utf-8")
