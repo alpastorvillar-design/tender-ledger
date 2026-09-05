@@ -247,6 +247,74 @@ class RetryTests(DownloadTestCase):
         self.assertEqual(len(self.server.received), 1)
 
 
+class FailureTelemetryTests(DownloadTestCase):
+    """A failed acquisition reports what it cost, not zero.
+
+    The runner writes these numbers into a manifest report, so a package that
+    transferred 12 MB and was then refused must not read as one that never
+    reached the network. Only counters cross the boundary -- no URL, header or
+    body.
+    """
+
+    def assert_cost(self, exc, *, attempts, downloaded_bytes):
+        self.assertEqual(exc.http_attempts, attempts)
+        self.assertEqual(exc.downloaded_bytes, downloaded_bytes)
+
+    def test_a_complete_body_refused_by_validation_reports_its_transfer(self):
+        payload = gzip.compress(b"complete, well-formed gzip, but not a package", mtime=0)
+        self.server.reply = body_reply(payload)
+        with self.assertRaises(DownloadError) as caught:
+            self.download()
+        self.assertIn("not a usable TED package", str(caught.exception))
+        self.assert_cost(caught.exception, attempts=1, downloaded_bytes=len(payload))
+        self.assertFalse(self.destination().exists())
+        self.assertEqual(self.part_files(), [])
+
+    def test_a_rejected_status_reports_one_attempt_and_no_body(self):
+        self.server.reply = body_reply(b"not found", status=404)
+        with self.assertRaises(DownloadError) as caught:
+            self.download()
+        self.assert_cost(caught.exception, attempts=1, downloaded_bytes=0)
+
+    def test_exhausted_retries_report_every_attempt_and_every_byte(self):
+        partial = self.archive[:200]
+
+        def truncated(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(self.archive)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(partial)
+            handler.close_connection = True
+
+        self.server.reply = truncated
+        with self.assertRaises(DownloadError) as caught:
+            self.download(budgets=DownloadBudgets(max_attempts=3, backoff_base_seconds=0.01))
+        self.assertIn("incomplete HTTP body", str(caught.exception))
+        self.assert_cost(caught.exception, attempts=3, downloaded_bytes=3 * len(partial))
+
+    def test_a_successful_acquisition_reports_the_same_aggregate(self):
+        partial = self.archive[:200]
+
+        def truncated(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(self.archive)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(partial)
+            handler.close_connection = True
+
+        self.replies = None
+        sequence = [truncated, body_reply(self.archive)]
+        self.server.reply = lambda handler: sequence[
+            min(len(self.server.received) - 1, len(sequence) - 1)
+        ](handler)
+        result = self.download(budgets=DownloadBudgets(backoff_base_seconds=0.01))
+        self.assertEqual(result.http_attempts, 2)
+        self.assertEqual(result.downloaded_bytes, len(partial) + len(self.archive))
+        self.assertEqual(result.size_bytes, len(self.archive))
+
+
 class LimitTests(DownloadTestCase):
     def test_an_advertised_oversized_body_is_refused_before_it_is_read(self):
         self.server.reply = body_reply(b"x" * 5000)

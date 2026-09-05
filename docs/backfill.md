@@ -125,6 +125,12 @@ across the two. It carries:
   bounded `error` string (at most 2,000 characters; never a full traceback, an
   HTTP body, a secret, or an absolute private path).
 
+`http_attempts` and `downloaded_bytes` count the acquisition, not the artifact:
+requests made and bytes received across all of them, reported the same way
+whether it succeeded or failed. A body that arrived in full and was then refused
+as not a package therefore reads as the transfer it was, and a retried
+acquisition reports more bytes than the artifact holds.
+
 An entry after the one that stopped the manifest never appears -- not marked
 skipped, simply absent, because it was never attempted.
 

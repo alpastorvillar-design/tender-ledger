@@ -47,7 +47,17 @@ _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
 class DownloadError(RuntimeError):
-    """The package could not be acquired. Nothing reached the destination."""
+    """The package could not be acquired. Nothing reached the destination.
+
+    A failure carries what the acquisition cost, in ``http_attempts`` and
+    ``downloaded_bytes``. Without them a body that transferred completely and
+    was then refused as not a package reports to a manifest run exactly like one
+    that never reached the network. Counters only: no URL, header or body ever
+    reaches this object.
+    """
+
+    http_attempts: int = 0
+    downloaded_bytes: int = 0
 
 
 class TransientDownloadError(DownloadError):
@@ -104,6 +114,9 @@ class Artifact:
     sha256: str
     size_bytes: int
     notice_count: int
+    #: Requests this acquisition made, and bytes it received across all of them.
+    #: A retried acquisition therefore reports more bytes than the artifact
+    #: holds; ``size_bytes`` is the artifact.
     http_attempts: int = 0
     downloaded_bytes: int = 0
 
@@ -173,7 +186,8 @@ def download_package(
 
     Every failure path removes this call's own temporary file and leaves any
     existing destination untouched; the rename is the only thing that changes
-    what a reader of the data directory sees.
+    what a reader of the data directory sees. Success and failure both report
+    the attempts made and the bytes received across them.
     """
     # URL injection is available to local tests, but it must not turn the
     # package identity itself into an unchecked label.
@@ -189,38 +203,50 @@ def download_package(
     spent = _ByteBudget(budgets.max_total_bytes)
     opener = _build_opener()
     last: TransientDownloadError | None = None
+    attempted = 0
 
-    for attempt in range(1, budgets.max_attempts + 1):
-        deadline.check()
-        temporary = destination.parent / f".{destination.name}.part-{uuid.uuid4().hex[:12]}"
-        try:
-            written = _fetch(url, temporary, opener, budgets, deadline, spent, clock)
-            artifact = validate_artifact(temporary, limits=limits)
-            if artifact is None:
-                raise DownloadError(
-                    f"the response is not a usable TED package:"
-                    f" {_describe_rejection(temporary, limits)}"
-                )
-            os.replace(temporary, destination)
-            _sync_directory(destination.parent)
-            return Artifact(
-                path=destination,
-                sha256=artifact.sha256,
-                size_bytes=artifact.size_bytes,
-                notice_count=artifact.notice_count,
-                http_attempts=attempt,
-                downloaded_bytes=written,
+    try:
+        for attempt in range(1, budgets.max_attempts + 1):
+            attempted = attempt
+            deadline.check()
+            temporary = (
+                destination.parent / f".{destination.name}.part-{uuid.uuid4().hex[:12]}"
             )
-        except TransientDownloadError as exc:
-            _discard(temporary)
-            last = exc
-            if attempt == budgets.max_attempts:
-                break
-            _wait(exc, attempt, budgets, deadline, clock)
-        except BaseException:
-            _discard(temporary)
-            raise
-    raise DownloadError(f"{last} after {budgets.max_attempts} attempts")
+            try:
+                _fetch(url, temporary, opener, budgets, deadline, spent, clock)
+                artifact = validate_artifact(temporary, limits=limits)
+                if artifact is None:
+                    raise DownloadError(
+                        f"the response is not a usable TED package:"
+                        f" {_describe_rejection(temporary, limits)}"
+                    )
+                os.replace(temporary, destination)
+                _sync_directory(destination.parent)
+                return Artifact(
+                    path=destination,
+                    sha256=artifact.sha256,
+                    size_bytes=artifact.size_bytes,
+                    notice_count=artifact.notice_count,
+                    http_attempts=attempt,
+                    downloaded_bytes=spent.used,
+                )
+            except TransientDownloadError as exc:
+                _discard(temporary)
+                last = exc
+                if attempt == budgets.max_attempts:
+                    break
+                _wait(exc, attempt, budgets, deadline, clock)
+            except BaseException:
+                _discard(temporary)
+                raise
+        raise DownloadError(f"{last} after {budgets.max_attempts} attempts")
+    except DownloadError as exc:
+        # One place, so every way out of the loop -- a refused status, an
+        # exhausted budget, a complete body that turned out not to be a package
+        # -- reports the same two counters instead of leaving them at zero.
+        exc.http_attempts = attempted
+        exc.downloaded_bytes = spent.used
+        raise
 
 
 def _describe_rejection(path: Path, limits: Limits) -> str:

@@ -314,6 +314,11 @@ def _ensure_artifact(
             url=url, budgets=budgets, clock=clock, limits=limits,
         )
     except DownloadError as exc:
+        # A failed acquisition still cost requests and bytes. Reporting them is
+        # what keeps a body that transferred and was then refused distinguishable
+        # from one that never reached the network.
+        progress.http_attempts = exc.http_attempts
+        progress.downloaded_bytes = exc.downloaded_bytes
         raise _Incomplete(f"{type(exc).__name__}: {exc}") from exc
     progress.artifact_action = "downloaded"
     progress.notice_count = artifact.notice_count

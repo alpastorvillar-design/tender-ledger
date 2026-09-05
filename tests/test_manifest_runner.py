@@ -291,6 +291,13 @@ class StopOnFailureTests(ManifestRunnerTestCase):
         self.assertEqual([e.outcome for e in report.entries], ["processed", "processed", "incomplete"])
         self.assertEqual([e.order for e in report.entries], [1, 2, 3])
 
+        # The stopping entry transferred a body and had it refused, so the
+        # report says what that attempt cost rather than reading like a package
+        # that never reached the network.
+        stopped = report.entries[2]
+        self.assertEqual(stopped.http_attempts, 1)
+        self.assertEqual(stopped.downloaded_bytes, len(b"not a valid archive"))
+
         for pid in ids[3:]:
             with self.subTest(package=pid):
                 self.assertEqual(self.fixtures[pid]["server"].received, [])

@@ -318,6 +318,24 @@ class SourceFailureTests(IngestTestCase):
         self.server.reply = serve(bytes(broken))
         self.assert_nothing_processed(self.ingest())
 
+    def test_a_body_that_transferred_and_was_refused_reports_what_it_cost(self):
+        # The failure a manifest report shows must not read like a package that
+        # never reached the network: the whole body arrived and was rejected.
+        self.server.reply = serve(b"<html>maintenance</html>")
+        result = self.ingest()
+        self.assert_nothing_processed(result)
+        self.assertEqual(result.http_attempts, 1)
+        self.assertEqual(result.downloaded_bytes, len(b"<html>maintenance</html>"))
+
+    def test_an_unreachable_source_reports_its_attempts_and_no_bytes(self):
+        self.server.reply = serve(b"busy", status=503)
+        result = self.ingest(budgets=DownloadBudgets(
+            max_attempts=2, backoff_base_seconds=0.01, total_seconds=30
+        ))
+        self.assert_nothing_processed(result)
+        self.assertEqual(result.http_attempts, 2)
+        self.assertEqual(result.downloaded_bytes, 0)
+
     def test_an_exhausted_source_leaves_a_resumable_run(self):
         self.server.reply = serve(b"busy", status=503)
         result = self.ingest(budgets=DownloadBudgets(
