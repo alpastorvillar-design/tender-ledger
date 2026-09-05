@@ -4,12 +4,14 @@ Status: acceptance plan for the historical workload. Archive inspection,
 transactional PostgreSQL loading, the projection v2 contract (official change
 references) and the six analytical workloads below are implemented on
 synthetic fixtures, with a verified daily load of 2,967 real notices under
-contract v1. A rehearsal against five real packages ran and loaded 53,489
-real notices (one monthly package plus the daily one) before hitting a
-structural blocker in the other three; see
-[measured-rehearsal.md](measured-rehearsal.md). The 100,000-notice rehearsal
-gate, the minimum million-notice gate, historical coverage, and SQL
-benchmarks at that scale remain unmet.
+contract v1. A rehearsal against the five real packages of the
+pilot manifest loaded and verified three of them and published a fourth
+without coverage: **165,250 notices, 162,283 distinct**, which meets the
+100,000-notice rehearsal gate. See
+[measured-rehearsal.md](measured-rehearsal.md). The minimum million-notice
+gate, historical coverage, and SQL benchmarks at that scale remain unmet, and
+two of the five identities are blocked by real archive content that needs a
+contract decision rather than a fix.
 
 ## Dataset and completion gates
 
@@ -53,7 +55,7 @@ The data model must support a documented notice grain, observed changes, source 
 5. [`monthly_coverage_calendar.sql`](../queries/monthly_coverage_calendar.sql) — coverage and ingestion freshness over a calendar axis with `LEFT JOIN`, distinguishing empty source periods, missing captures, retired checkpoints and unavailable verification.
 6. [`cross_package_overlap_audit.sql`](../queries/cross_package_overlap_audit.sql) — cross-package identity overlap and content discrepancies using `NOT EXISTS` (both directions, so neither package is assumed to be the other's subset) and `EXCEPT` (whole-row comparison) over publication keys.
 
-These six are implemented and fixture-tested against small synthetic datasets built for correctness and adversarial cases (duplicates, absent fields, unresolved references, retired checkpoints), and now also measured once against 53,489 real notices — well below the scale this section requires. `EXPLAIN (ANALYZE, BUFFERS)`, 20 repeated timings, and equality of results before/after a candidate index all ran at that smaller scale; see [measured-rehearsal.md](measured-rehearsal.md). They must be re-measured at the 1,000,000-notice minimum gate before any conclusion here is trusted.
+These six are implemented and fixture-tested against small synthetic datasets built for correctness and adversarial cases (duplicates, absent fields, unresolved references, retired checkpoints), and measured against 165,250 real notices — above the 100,000-notice rehearsal gate and still well below the minimum this section requires. `EXPLAIN (ANALYZE, BUFFERS)`, 20 repeated timings, equality of results before/after a candidate index, and an annual-partitioning comparison on an isolated copy all ran at that scale; see [measured-rehearsal.md](measured-rehearsal.md). They must be re-measured at the 1,000,000-notice minimum gate before any conclusion here is trusted.
 
 Extend buyer-level analysis only after verifying organization identifiers and join cardinality. Do not infer awards, expenditure, or supplier outcomes from notices that do not contain those facts.
 
