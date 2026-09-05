@@ -254,3 +254,13 @@ class FakeTransport:
         if isinstance(item, BaseException):
             raise item
         return item
+
+
+def daily_container(name, members):
+    """One daily ``.tar.gz`` member of a monthly archive, as TED publishes it.
+
+    The bytes are exactly what ``package_bytes`` builds for a standalone daily
+    package, which is the point: a container is not a special format, it is a
+    daily package carried inside the month's archive.
+    """
+    return name, package_bytes(members)

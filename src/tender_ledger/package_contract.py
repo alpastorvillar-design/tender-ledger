@@ -61,6 +61,10 @@ class ResourcePolicy:
 
     ``expanded_bytes`` is streamed and never written to disk, so it bounds work
     rather than storage.
+
+    ``container_count`` is the one ceiling whose zero is meaningful: a package
+    kind that may not carry a nested daily archive at all is expressed as zero
+    containers, not as a permissive number nobody reaches.
     """
 
     # Archive
@@ -68,6 +72,11 @@ class ResourcePolicy:
     expanded_bytes: int
     member_bytes: int
     notices: int
+    #: Nested daily ``.tar.gz`` members this kind of package may carry. Zero
+    #: means the layout is refused outright.
+    container_count: int
+    #: Compressed ceiling for one nested container.
+    container_bytes: int
     # Acquisition
     download_attempts: int
     download_total_bytes: int
@@ -85,7 +94,12 @@ class ResourcePolicy:
 
     def __post_init__(self) -> None:
         for field in dataclasses.fields(self):
-            if getattr(self, field.name) <= 0:
+            value = getattr(self, field.name)
+            if field.name == "container_count":
+                if value < 0:
+                    raise ValueError("container_count must not be negative")
+                continue
+            if value <= 0:
                 raise ValueError(f"{field.name} must be positive")
         # One acquisition may restart from byte zero, so the aggregate budget has
         # to cover every attempt or a source that keeps truncating exhausts it
@@ -107,6 +121,13 @@ class ResourcePolicy:
             raise ValueError(
                 f"member_bytes {self.member_bytes} exceeds the whole expanded archive"
             )
+        # A nested container is carried inside the archive, so it cannot be
+        # allowed to be larger than the archive's own compressed ceiling.
+        if self.container_bytes > self.compressed_bytes:
+            raise ValueError(
+                f"container_bytes {self.container_bytes} exceeds the compressed"
+                f" ceiling of {self.compressed_bytes}"
+            )
 
 
 #: The daily flow's ceilings, unchanged: one OJ S issue is small and bounded, and
@@ -116,6 +137,8 @@ DAILY_POLICY = ResourcePolicy(
     expanded_bytes=512 * _MIB,
     member_bytes=8 * _MIB,
     notices=10_000,
+    container_count=0,
+    container_bytes=64 * _MIB,
     download_attempts=3,
     download_total_bytes=192 * _MIB,
     download_seconds=300.0,
@@ -130,19 +153,26 @@ DAILY_POLICY = ResourcePolicy(
     api_seconds=300.0,
 )
 
-#: Monthly packages widen exactly eight ceilings and nothing else. The numbers
+#: Monthly packages widen exactly nine ceilings and nothing else. The numbers
 #: come from the 2020-2025 inventory that has actually been measured: 512 MiB is
 #: 1.23x the largest of the 72 observed monthly headers (416,604,969 B), 150,000
 #: notices is roughly 1.6x the largest month estimated from its compressed
 #: bytes-per-notice rate, and 8 GiB is about 3x the largest month's expansion at
 #: the only ratio ever measured (6.66x, on one mixed daily package). They must be
 #: re-derived if the historical target ever grows past 2025.
+#:
+#: ``container_count`` is the only one that opens a layout rather than raising a
+#: number: some months are published as one nested ``.tar.gz`` per publication
+#: day instead of flat XML. A month has at most 31 of those days, so 64 is twice
+#: any month can hold; a container is bounded by what a daily package itself may
+#: cost, and its expansion is charged to ``expanded_bytes`` like any other member.
 MONTHLY_POLICY = dataclasses.replace(
     DAILY_POLICY,
     compressed_bytes=512 * _MIB,
     expanded_bytes=8 * 1024 * _MIB,
     member_bytes=32 * _MIB,
     notices=150_000,
+    container_count=64,
     download_total_bytes=1_536 * _MIB,
     download_seconds=1_800.0,
     api_max_pages=620,

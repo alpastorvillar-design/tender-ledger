@@ -53,17 +53,26 @@ class Limits:
     The production values come from :mod:`package_contract`, so a daily and a
     monthly archive are validated against ceilings that are decided in one place.
     Tests construct small limits explicitly.
+
+    The defaults are the daily ones, which is the conservative choice: they admit
+    no nested container at all, so a caller that forgets to name a policy cannot
+    accidentally open a layout the package identity never approved.
     """
 
     compressed_bytes: int = DAILY_POLICY.compressed_bytes
     expanded_bytes: int = DAILY_POLICY.expanded_bytes
     member_bytes: int = DAILY_POLICY.member_bytes
     notices: int = DAILY_POLICY.notices
+    container_count: int = DAILY_POLICY.container_count
+    container_bytes: int = DAILY_POLICY.container_bytes
 
     def __post_init__(self) -> None:
-        values = (self.compressed_bytes, self.expanded_bytes, self.member_bytes, self.notices)
+        values = (self.compressed_bytes, self.expanded_bytes, self.member_bytes,
+                  self.notices, self.container_bytes)
         if min(values) <= 0:
             raise ValueError("All archive limits must be positive")
+        if self.container_count < 0:
+            raise ValueError("container_count must not be negative")
 
 
 def limits_from(policy: ResourcePolicy) -> Limits:
@@ -72,6 +81,8 @@ def limits_from(policy: ResourcePolicy) -> Limits:
         expanded_bytes=policy.expanded_bytes,
         member_bytes=policy.member_bytes,
         notices=policy.notices,
+        container_count=policy.container_count,
+        container_bytes=policy.container_bytes,
     )
 
 
@@ -163,19 +174,41 @@ def inspect_notice(member_name: str, xml: bytes) -> tuple[NoticeKey, str, str]:
     return key, form, version
 
 
-class _ExpandedReader:
-    def __init__(self, stream: BinaryIO, limit: int):
-        self.stream = stream
+class _ExpandedBudget:
+    """Bytes one archive is allowed to expand to, outer and nested together.
+
+    A nested container's expansion is spent from the same budget as the outer
+    archive's, so a container cannot use its own compression to buy work the
+    package identity's ceiling forbids.
+    """
+
+    def __init__(self, limit: int):
         self.limit = limit
         self.count = 0
 
-    def read(self, size: int = -1) -> bytes:
-        remaining = self.limit - self.count
-        amount = remaining + 1 if size < 0 else min(size, remaining + 1)
-        data = self.stream.read(amount)
-        self.count += len(data)
+    def remaining(self) -> int:
+        return self.limit - self.count
+
+    def spend(self, count: int) -> None:
+        self.count += count
         if self.count > self.limit:
             raise PackageError("Expanded archive exceeds its byte limit")
+
+
+class _ExpandedReader:
+    """Read from one decompressed stream, charging every byte to ``budget``."""
+
+    def __init__(self, stream: BinaryIO, budget: _ExpandedBudget):
+        self.stream = stream
+        self.budget = budget
+
+    def read(self, size: int = -1) -> bytes:
+        # One byte past the budget is read deliberately: it is what turns "the
+        # limit is reached" into "the limit is exceeded".
+        allowed = self.budget.remaining() + 1
+        amount = allowed if size < 0 else min(size, allowed)
+        data = self.stream.read(amount)
+        self.budget.spend(len(data))
         return data
 
 
@@ -202,6 +235,16 @@ def _check_member_path(member: tarfile.TarInfo) -> None:
         raise PackageError(f"Unsafe member path: {member.name!r}")
 
 
+#: TED publishes some months as one nested archive per publication day. Only
+#: this suffix is treated as a container; anything else that is not XML stays an
+#: ordinary unsupported member.
+CONTAINER_SUFFIX = ".tar.gz"
+
+FLAT_LAYOUT = "flat"
+NESTED_LAYOUT = "nested"
+EMPTY_LAYOUT = "empty"
+
+
 class _PackageArchive:
     """Walk a gzip-tar TED package one member at a time under fixed resource limits.
 
@@ -217,6 +260,14 @@ class _PackageArchive:
     that pass ``on_rejected`` get it reported and the walk continues, which is
     what turns a first-failure stop into an inventory. The loader passes nothing,
     so a load stays all-or-nothing.
+
+    Two layouts are supported, and never both in the same archive: XML members
+    under directories, or exactly one level of nested daily ``.tar.gz``
+    containers whose own members are XML. Nesting is opened by the package
+    policy (``container_count``), so a daily package refuses it whatever the
+    archive contains, and a container inside a container is refused everywhere.
+    Containers are streamed like every other member: nothing is extracted to
+    disk and no whole day is held in memory.
     """
 
     def __init__(self, path: Path, limits: Limits):
@@ -227,6 +278,8 @@ class _PackageArchive:
         self.xml_member_bytes = 0
         self.member_count = 0
         self.xml_member_count = 0
+        self.container_count = 0
+        self.layout = EMPTY_LAYOUT
 
     def __enter__(self) -> "_PackageArchive":
         try:
@@ -239,7 +292,8 @@ class _PackageArchive:
             self._source.close()
             raise PackageError("Compressed archive exceeds its byte limit")
         self._gzip = gzip.GzipFile(fileobj=self._source, mode="rb")
-        self._reader = _ExpandedReader(self._gzip, self.limits.expanded_bytes)
+        self._budget = _ExpandedBudget(self.limits.expanded_bytes)
+        self._reader = _ExpandedReader(self._gzip, self._budget)
         self._tar: tarfile.TarFile | None = None
         return self
 
@@ -265,43 +319,129 @@ class _PackageArchive:
                 _check_member_path(member)
                 if member.isdir():
                     continue
-                if not member.isfile() or member.issparse():
-                    raise PackageError(f"Unsupported archive member: {member.name!r}")
-                if member.size > self.limits.member_bytes:
-                    raise PackageError(f"Member exceeds its byte limit: {member.name}")
-                if self.member_count >= self.limits.notices:
-                    raise PackageError("Archive exceeds its notice limit")
-                stream = self._tar.extractfile(member)
-                if stream is None:
-                    raise PackageError(f"Unreadable member: {member.name}")
-                with stream:
-                    xml = stream.read(self.limits.member_bytes + 1)
-                if len(xml) != member.size:
-                    raise PackageError(f"Incomplete member: {member.name}")
-                self.member_count += 1
-                try:
-                    if not member.name.endswith(".xml"):
-                        raise PackageError(
-                            f"Unsupported archive member: {member.name!r}",
-                            code="unsupported_member_name",
-                        )
-                    self.xml_member_count += 1
-                    self.xml_member_bytes += member.size
-                    parsed = parse_notice(member.name, xml)
-                except PackageError as exc:
-                    if on_rejected is None:
-                        raise
-                    on_rejected(member.name, exc)
+                self._check_regular(member)
+                if self._is_container(member):
+                    yield from self._container(member, on_rejected)
                     continue
-                yield NoticeMember(*parsed, member.name)
-            # tar iteration can stop before gzip's trailer. Consume the rest to
-            # check CRC/length and reject non-padding data after the tar.
-            while remainder := self._reader.read(64 * 1024):
-                if any(remainder):
-                    raise PackageError("Unexpected data after the tar end marker")
-            self.expanded_bytes = self._reader.count
+                yield from self._notice(self._tar, member, member.name, on_rejected)
+            self._drain(self._reader, self.path.name)
+            self.expanded_bytes = self._budget.count
         except (OSError, EOFError, tarfile.TarError) as exc:
             raise PackageError(f"Unreadable or corrupt archive: {self.path.name}") from exc
+
+    def _is_container(self, member: tarfile.TarInfo) -> bool:
+        """Whether this outer member is a nested daily archive to walk into.
+
+        The layout is decided by the archive, but only ever within what the
+        policy already allows: with ``container_count`` at zero the answer is
+        always no, and the member falls through to the ordinary rejection path.
+        """
+        if self.limits.container_count <= 0 or not member.name.endswith(CONTAINER_SUFFIX):
+            return False
+        self._claim_layout(NESTED_LAYOUT, member.name)
+        return True
+
+    def _claim_layout(self, layout: str, member_name: str) -> None:
+        if self.layout not in (EMPTY_LAYOUT, layout):
+            raise PackageError(
+                f"Archive mixes flat and nested members: {member_name!r}"
+            )
+        self.layout = layout
+
+    def _container(self, member: tarfile.TarInfo, on_rejected):
+        """Walk one nested daily archive, streaming, without recursing further."""
+        if self.container_count >= self.limits.container_count:
+            raise PackageError("Archive exceeds its nested container limit")
+        if member.size > self.limits.container_bytes:
+            raise PackageError(f"Nested container exceeds its byte limit: {member.name}")
+        self.container_count += 1
+
+        stream = self._tar.extractfile(member)
+        if stream is None:
+            raise PackageError(f"Unreadable member: {member.name}")
+        with stream:
+            inner_gzip = gzip.GzipFile(fileobj=stream, mode="rb")
+            try:
+                # The same budget as the outer archive: a container's expansion
+                # is work this package is spending, not work it hides.
+                reader = _ExpandedReader(inner_gzip, self._budget)
+                inner = tarfile.open(  # noqa: SIM115 -- closed in the finally below
+                    fileobj=reader, mode="r|", stream=True, bufsize=512
+                )
+                try:
+                    for nested in inner:
+                        _check_member_path(nested)
+                        if nested.isdir():
+                            continue
+                        self._check_regular(nested)
+                        if nested.name.endswith(CONTAINER_SUFFIX):
+                            raise PackageError(
+                                f"Nested archive inside a container: {nested.name!r}"
+                            )
+                        label = f"{member.name}/{nested.name}"
+                        yield from self._notice(inner, nested, label, on_rejected)
+                finally:
+                    inner.close()
+                self._drain(reader, member.name)
+            finally:
+                inner_gzip.close()
+
+    def _notice(self, tar: tarfile.TarFile, member: tarfile.TarInfo, label: str, on_rejected):
+        """Read one candidate XML member and yield it, or report its rejection.
+
+        ``label`` names the member for diagnostics -- for a nested member, the
+        container it came from and its own name. It is never a filesystem path.
+        """
+        if member.size > self.limits.member_bytes:
+            raise PackageError(f"Member exceeds its byte limit: {label}")
+        if self.member_count >= self.limits.notices:
+            raise PackageError("Archive exceeds its notice limit")
+        stream = tar.extractfile(member)
+        if stream is None:
+            raise PackageError(f"Unreadable member: {label}")
+        with stream:
+            xml = stream.read(self.limits.member_bytes + 1)
+        if len(xml) != member.size:
+            raise PackageError(f"Incomplete member: {label}")
+        self.member_count += 1
+        is_xml = member.name.endswith(".xml")
+        # Which layout this archive is committed to is an archive-level fact, so
+        # it is settled before the member-level rejections a survey may absorb.
+        if is_xml and tar is self._tar:
+            self._claim_layout(FLAT_LAYOUT, member.name)
+        try:
+            if not is_xml:
+                raise PackageError(
+                    f"Unsupported archive member: {label!r}",
+                    code="nested_container_not_allowed"
+                    if member.name.endswith(CONTAINER_SUFFIX)
+                    else "unsupported_member_name",
+                )
+            self.xml_member_count += 1
+            self.xml_member_bytes += member.size
+            parsed = parse_notice(label, xml)
+        except PackageError as exc:
+            if on_rejected is None:
+                raise
+            on_rejected(label, exc)
+            return
+        yield NoticeMember(*parsed, label)
+
+    @staticmethod
+    def _check_regular(member: tarfile.TarInfo) -> None:
+        if not member.isfile() or member.issparse():
+            raise PackageError(f"Unsupported archive member: {member.name!r}")
+
+    @staticmethod
+    def _drain(reader: _ExpandedReader, name: str) -> None:
+        """Finish a gzip stream: tar iteration can stop before its trailer.
+
+        Reading to the end checks the CRC and length, and rejects anything but
+        padding after the tar's own end marker.
+        """
+        while remainder := reader.read(64 * 1024):
+            if any(remainder):
+                raise PackageError(f"Unexpected data after the tar end marker in {name}")
 
 
 def stream_notices(path: Path, limits: Limits = Limits()):
@@ -383,6 +523,8 @@ def survey_package(
             "compressed_bytes": archive.compressed_bytes,
             "expanded_bytes": archive.expanded_bytes,
             "xml_member_bytes": archive.xml_member_bytes,
+            "layout": archive.layout,
+            "container_count": archive.container_count,
             "member_count": archive.member_count,
             "xml_member_count": archive.xml_member_count,
             "notice_count": len(keys),
@@ -440,6 +582,8 @@ def inspect_package(path: Path, limits: Limits = Limits()) -> dict:
             "compressed_bytes": archive.compressed_bytes,
             "expanded_bytes": archive.expanded_bytes,
             "xml_member_bytes": archive.xml_member_bytes,
+            "layout": archive.layout,
+            "container_count": archive.container_count,
             "notice_count": len(keys),
             "formats": dict(sorted(formats.items())),
             "schema_versions": dict(sorted(versions.items())),
