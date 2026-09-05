@@ -480,10 +480,22 @@ def survey_package(
     bytes a load would refuse. Member-level faults are counted by reason instead,
     and the result says plainly whether the archive is loadable.
 
+    Each member is also projected, and discarded. ``compatible_for_load`` is a
+    claim about what a load would do, and a load projects: a real monthly package
+    carries a legacy notice with no ``CODED_DATA_SECTION``, which parses as a
+    supported root and then condemns the capture. Counting only what the walker
+    accepts would call that archive loadable and be wrong about the one question
+    this exists to answer.
+
     Nothing is written: no capture, no rows, no coverage claim. The output
     carries counts, schema provenance and sanitized member names -- never XML
     content, notice fields or filesystem paths.
     """
+    # Local import: the projection is built on this module, so importing it at
+    # module scope would be circular. The survey is the one reader here that
+    # needs it.
+    from .projection import project_member
+
     if source_package_id is not None:
         package_identity(source_package_id)
 
@@ -516,6 +528,11 @@ def survey_package(
             formats[member.source_format] += 1
             versions[member.schema_version] += 1
             roots[member.root.tag] += 1
+            try:
+                project_member(member)
+            except PackageError as exc:
+                reject(member.member_name, exc)
+                continue
             if member.key in keys:
                 # A load fails on this through the primary key. Here it is one
                 # more finding, so the rest of the archive still gets counted.

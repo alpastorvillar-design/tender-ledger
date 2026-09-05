@@ -10,6 +10,7 @@ import gzip
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -245,6 +246,71 @@ class IncompatibleSurveyTests(SurveyTestCase):
         # A stable prefix in archive order, not an arbitrary selection.
         self.assertEqual(result["incompatible_sample"][0]["member"], "000001_2023.xml")
         self.assertEqual(result["incompatible_sample"][-1]["member"], "000020_2023.xml")
+
+
+class ProjectionCompatibilityTests(SurveyTestCase):
+    setUpClass = classmethod(lambda cls: ensure_test_database())
+
+    """A member the walker accepts can still be one the projection cannot use.
+
+    `compatible_for_load` is a claim about what a load would do, so it has to
+    survive the projection too: a real monthly package carries a legacy notice
+    with no CODED_DATA_SECTION, which parses as a supported root and then fails
+    the load. A survey that called that archive loadable would be wrong about
+    the one thing it exists to answer.
+    """
+
+    def load_publishes(self, path):
+        conn = db.connect(load_config(dbname=TEST_DB))
+        self.addCleanup(conn.close)
+        truncate_all(conn)
+        return load_package(conn, path, "monthly/2020-01", batch_size=2).status
+
+    def assert_survey_matches_load(self, members, *, reason):
+        path = self.archive(members, name=f"{reason}.tar.gz")
+        result = survey_package(path, limits_for("monthly/2020-01"))
+        self.assertFalse(result["compatible_for_load"])
+        self.assertEqual(result["incompatible_reasons"], {reason: 1})
+        self.assertEqual(result["incompatible_member_count"], 1)
+        self.assertEqual(self.load_publishes(path), "failed")
+        return result
+
+    def test_a_legacy_notice_without_coded_data_is_not_loadable(self):
+        name, xml = legacy_member(1)
+        stripped = re.sub(rb"<CODED_DATA_SECTION>.*</CODED_DATA_SECTION>", b"", xml,
+                          flags=re.DOTALL)
+        result = self.assert_survey_matches_load(
+            [legacy_member(2), (name, stripped)], reason="unprojectable_notice"
+        )
+        # It parsed: the schema inventory still knows what it was.
+        self.assertEqual(result["formats"], {"legacy": 2})
+        self.assertEqual(result["notice_count"], 1)
+
+    def test_a_notice_without_a_publication_date_is_not_loadable(self):
+        self.assert_survey_matches_load(
+            [legacy_member(1, date_pub="")], reason="missing_publication_date"
+        )
+        self.assert_survey_matches_load(
+            [eforms_member(1, pub_date="")], reason="missing_publication_date"
+        )
+
+    def test_an_unparseable_date_is_not_loadable(self):
+        self.assert_survey_matches_load(
+            [legacy_member(1, date_pub="last Tuesday")], reason="unparseable_date"
+        )
+
+    def test_an_empty_change_reference_is_not_loadable(self):
+        self.assert_survey_matches_load(
+            [eforms_member(1, change_refs=[("", None)])],
+            reason="empty_change_reference",
+        )
+
+    def test_a_projectable_archive_is_still_reported_loadable(self):
+        path = self.archive([legacy_member(1), eforms_member(2)])
+        self.assertTrue(
+            survey_package(path, limits_for("monthly/2020-01"))["compatible_for_load"]
+        )
+        self.assertEqual(self.load_publishes(path), "published")
 
 
 class ArchiveRiskTests(SurveyTestCase):

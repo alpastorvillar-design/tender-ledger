@@ -105,11 +105,15 @@ def _parse_date(raw: str | None, member_name: str, kind: str) -> tuple[dt.date |
     iso = re.match(r"(\d{4})-(\d{2})-(\d{2})", raw)
     match = compact or iso
     if match is None:
-        raise PackageError(f"Unparseable {kind} date {raw!r} in {member_name}")
+        raise PackageError(
+            f"Unparseable {kind} date {raw!r} in {member_name}", code="unparseable_date"
+        )
     try:
         value = dt.date(int(match[1]), int(match[2]), int(match[3]))
     except ValueError as exc:
-        raise PackageError(f"Invalid {kind} date {raw!r} in {member_name}") from exc
+        raise PackageError(
+            f"Invalid {kind} date {raw!r} in {member_name}", code="unparseable_date"
+        ) from exc
     return value, raw
 
 
@@ -152,12 +156,18 @@ def _project_legacy(root: ET.Element, key, member_name: str, version: str) -> Pr
 
     coded = root.find(f"{{{ns}}}CODED_DATA_SECTION")
     if coded is None:
-        raise PackageError(f"Legacy notice without CODED_DATA_SECTION: {member_name}")
+        raise PackageError(
+            f"Legacy notice without CODED_DATA_SECTION: {member_name}",
+            code="unprojectable_notice",
+        )
 
     pub_raw = coded.findtext(q("REF_OJS", "DATE_PUB"))
     publication_date, publication_raw = _parse_date(pub_raw, member_name, "publication")
     if publication_date is None:
-        raise PackageError(f"Legacy notice without a publication date: {member_name}")
+        raise PackageError(
+            f"Legacy notice without a publication date: {member_name}",
+            code="missing_publication_date",
+        )
 
     dispatch_date, dispatch_raw = _parse_date(
         coded.findtext(q("CODIF_DATA", "DS_DATE_DISPATCH")), member_name, "dispatch"
@@ -201,7 +211,10 @@ def _project_eforms(root: ET.Element, key, member_name: str, version: str) -> Pr
         pub_date_el.text if pub_date_el is not None else None, member_name, "publication"
     )
     if publication_date is None:
-        raise PackageError(f"eForms notice without a publication date: {member_name}")
+        raise PackageError(
+            f"eForms notice without a publication date: {member_name}",
+            code="missing_publication_date",
+        )
 
     dispatch_date, dispatch_raw = _parse_date(
         root.findtext(f"{_CBC}IssueDate"), member_name, "dispatch"

@@ -198,12 +198,16 @@ python -m tender_ledger inspect path/to/package.tar.gz --package-id monthly/2020
 ```
 
 The survey streams the same archive through the same walker, the same archive
-defenses and the same resource limits as a load, then counts what a load would
-have stopped at:
+defenses and the same resource limits as a load, and projects each member the
+same way, then counts what a load would have stopped at. Projecting matters:
+a real monthly package carries a legacy notice with no `CODED_DATA_SECTION`,
+which parses as a supported root and then condemns the capture, so a survey that
+only walked would have called that archive loadable.
 
 | Reported | What it answers |
 | --- | --- |
 | `sha256`, compressed / expanded / XML bytes | Which bytes were surveyed, and what they cost to read |
+| `layout`, `container_count` | `flat`, `nested` (one `.tar.gz` per publication day) or `empty`, and how many containers were walked |
 | `member_count`, `xml_member_count`, `notice_count` | Members admitted, members named `.xml`, and distinct loadable identities |
 | `formats`, `schema_versions`, `roots` | Which supported eras and schema versions are actually in there; version output is capped at 20 categories |
 | `schema_version_kinds` | Total distinct supported versions, including categories omitted from the bounded map |
@@ -216,8 +220,10 @@ have stopped at:
 Two kinds of rejection stay deliberately different. A **member-level** fault —
 a non-XML member, an unparseable identity, a bad encoding, a DTD or entity
 declaration, malformed XML, an unsupported root, a filename that disagrees with
-its `DOC_ID`, a missing eForms customization or identifier — is counted and the
-walk continues, which is what makes an inventory possible. An **archive-level**
+its `DOC_ID`, a missing eForms customization or identifier, a notice the
+projection cannot use (no `CODED_DATA_SECTION`, no publication date, an
+unparseable date, an empty change reference) — is counted and the walk
+continues, which is what makes an inventory possible. An **archive-level**
 fault — an unsafe member path, a member that is not a regular file, an exhausted
 byte or notice limit, truncation, a bad gzip CRC, a corrupt tar, data after the
 end marker — means further reading is unsafe or meaningless, so the survey stops
