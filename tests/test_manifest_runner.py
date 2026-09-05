@@ -404,7 +404,7 @@ class ContractVersionReplayTests(ManifestRunnerTestCase):
     as a valid replay by the runner -- this is ingest_package's own contract
     check, carried through unchanged."""
 
-    def test_a_v1_checkpoint_does_not_count_as_a_replay_under_the_runner(self):
+    def test_a_v2_checkpoint_does_not_count_as_a_replay_under_the_runner(self):
         self.add_fixture(
             "daily/202300220", [legacy_member(1), legacy_member(2)], daily_source([1, 2])
         )
@@ -413,10 +413,10 @@ class ContractVersionReplayTests(ManifestRunnerTestCase):
         self.assertEqual(first.entries[0].outcome, "processed")
         first_capture_id = first.entries[0].capture_id
 
-        self._downgrade_to_v1(first_capture_id)
-        self.assertEqual(self.checkpoint_contract_version("daily/202300220"), "1")
+        self._downgrade_to_v2(first_capture_id)
+        self.assertEqual(self.checkpoint_contract_version("daily/202300220"), "2")
 
-        # A v1 checkpoint declines: the reprojection that follows genuinely
+        # A v2 checkpoint declines: the reprojection that follows genuinely
         # re-verifies, so it needs its own, un-consumed script.
         self.fixtures["daily/202300220"]["transport"] = FakeTransport(daily_source([1, 2]))
 
@@ -426,9 +426,9 @@ class ContractVersionReplayTests(ManifestRunnerTestCase):
         entry = second.entries[0]
         self.assertEqual(entry.outcome, "processed")  # not "replayed"
         self.assertNotEqual(entry.capture_id, first_capture_id)
-        self.assertEqual(self.checkpoint_contract_version("daily/202300220"), "2")
+        self.assertEqual(self.checkpoint_contract_version("daily/202300220"), "3")
 
-    def _downgrade_to_v1(self, capture_id):
+    def _downgrade_to_v2(self, capture_id):
         package, run_id, attempt_id, sha256, notice_count = self.conn.execute(
             "select source_package_id, run_id, verification_attempt_id, artifact_sha256,"
             " notice_count from tl_work.package_checkpoint where capture_id = %s",
@@ -438,18 +438,18 @@ class ContractVersionReplayTests(ManifestRunnerTestCase):
             "delete from tl_work.package_checkpoint where capture_id = %s", (capture_id,)
         )
         self.conn.execute(
-            "update tl_work.capture set contract_version = '1' where capture_id = %s",
+            "update tl_work.capture set contract_version = '2' where capture_id = %s",
             (capture_id,),
         )
         self.conn.execute(
-            "update tl_work.verification_attempt set contract_version = '1'"
+            "update tl_work.verification_attempt set contract_version = '2'"
             " where capture_id = %s",
             (capture_id,),
         )
         self.conn.execute(
             "insert into tl_work.package_checkpoint (source_package_id, run_id, capture_id,"
             " verification_attempt_id, artifact_sha256, contract_version, notice_count)"
-            " values (%s, %s, %s, %s, %s, '1', %s)",
+            " values (%s, %s, %s, %s, %s, '2', %s)",
             (package, run_id, capture_id, attempt_id, sha256, notice_count),
         )
 

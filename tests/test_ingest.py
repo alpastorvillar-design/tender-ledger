@@ -763,9 +763,9 @@ class ContractVersionReplayTests(IngestTestCase):
     """A checkpoint sealed under an older projection contract is never replayed,
     even when it is otherwise internally coherent."""
 
-    def _downgrade_to_v1(self, capture_id):
-        """Rewrite a real, freshly-sealed v2 checkpoint to look exactly like a
-        coherent v1 one: same capture, same artifact, same attempt -- only the
+    def _downgrade_to_v2(self, capture_id):
+        """Rewrite a real, freshly-sealed v3 checkpoint to look exactly like a
+        coherent v2 one: same capture, same artifact, same attempt -- only the
         contract version differs. This is what a checkpoint sealed before this
         milestone actually looks like, produced without a second code path.
 
@@ -783,18 +783,18 @@ class ContractVersionReplayTests(IngestTestCase):
             "delete from tl_work.package_checkpoint where capture_id = %s", (capture_id,)
         )
         self.conn.execute(
-            "update tl_work.capture set contract_version = '1' where capture_id = %s",
+            "update tl_work.capture set contract_version = '2' where capture_id = %s",
             (capture_id,),
         )
         self.conn.execute(
-            "update tl_work.verification_attempt set contract_version = '1'"
+            "update tl_work.verification_attempt set contract_version = '2'"
             " where capture_id = %s",
             (capture_id,),
         )
         self.conn.execute(
             "insert into tl_work.package_checkpoint (source_package_id, run_id, capture_id,"
             " verification_attempt_id, artifact_sha256, contract_version, notice_count)"
-            " values (%s, %s, %s, %s, %s, '1', %s)",
+            " values (%s, %s, %s, %s, %s, '2', %s)",
             (package, run_id, capture_id, attempt_id, sha256, notice_count),
         )
 
@@ -804,23 +804,23 @@ class ContractVersionReplayTests(IngestTestCase):
             (capture_id,),
         ).fetchone()[0]
 
-    def test_a_v1_checkpoint_is_never_replayed_under_v2_code(self):
+    def test_a_v2_checkpoint_is_never_replayed_under_v3_code(self):
         first = self.ingest()
-        self.assertEqual(self.capture_contract_version(first.capture_id), "2")
-        self._downgrade_to_v1(first.capture_id)
+        self.assertEqual(self.capture_contract_version(first.capture_id), "3")
+        self._downgrade_to_v2(first.capture_id)
         status_before = self.status()
         self.assertTrue(status_before["checkpoint_is_current"])
-        self.assertEqual(status_before["checkpoint_contract_version"], "1")
+        self.assertEqual(status_before["checkpoint_contract_version"], "2")
 
-        again = self.ingest()  # a coherent v1 checkpoint; still not a replay
+        again = self.ingest()  # a coherent v2 checkpoint; still not a replay
 
         self.assertEqual(again.outcome, "processed")
         self.assertNotEqual(again.outcome, "replayed")
         self.assertNotEqual(again.run_id, first.run_id)
         self.assertNotEqual(again.capture_id, first.capture_id)
-        self.assertEqual(self.capture_contract_version(again.capture_id), "2")
+        self.assertEqual(self.capture_contract_version(again.capture_id), "3")
 
-        # the v1 capture is superseded, not deleted or rewritten
+        # the v2 capture is superseded, not deleted or rewritten
         self.assertEqual(
             self.conn.execute(
                 "select status from tl_work.capture where capture_id = %s",
@@ -829,7 +829,7 @@ class ContractVersionReplayTests(IngestTestCase):
             "superseded",
         )
         self.assertEqual(self.notices(), [f"{n}-2023" for n in self.NUMBERS])
-        # this run genuinely reprojected: v2 change-reference status is not NULL
+        # this run genuinely reprojected: change-reference status is not NULL
         self.assertEqual(
             {
                 r[0]
@@ -841,7 +841,7 @@ class ContractVersionReplayTests(IngestTestCase):
             {"not_applicable"},  # the fixtures in this module are legacy-only
         )
 
-    def test_a_current_v2_checkpoint_still_replays_with_no_new_work(self):
+    def test_a_current_v3_checkpoint_still_replays_with_no_new_work(self):
         first = self.ingest()
         requests_before = len(self.server.received)
 

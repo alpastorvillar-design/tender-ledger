@@ -20,6 +20,12 @@ ordered collection, never collapsed into a scalar column or deduplicated. An
 element that is present but empty or whitespace-only is not a lesser form of
 ``absent``: it is rejected, which fails the whole member the same way a missing
 publication date does.
+
+Contract v3 fixes two paths exposed by the measured monthly rehearsal. eForms
+publication dates come specifically from ``efac:Publication``; privacy-release
+dates elsewhere in the document have a different meaning. Legacy sections may
+be unqualified even when ``TED_EXPORT`` itself has a namespace, so their own
+namespace determines the paths below them.
 """
 
 import datetime as dt
@@ -29,7 +35,7 @@ from dataclasses import dataclass
 
 from .packages import NoticeKey, PackageError, parse_notice
 
-CONTRACT_VERSION = "2"
+CONTRACT_VERSION = "3"
 
 _CBC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2}"
 _CAC = "{urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2}"
@@ -149,17 +155,24 @@ def _change_references(root: ET.Element, member_name: str) -> tuple[ChangeRefere
 
 
 def _project_legacy(root: ET.Element, key, member_name: str, version: str) -> ProjectedNotice:
-    ns = root.tag[1 : root.tag.index("}")]
+    root_ns = root.tag[1 : root.tag.index("}")]
 
-    def q(*names: str) -> str:
-        return "/".join(f"{{{ns}}}{n}" for n in names)
-
-    coded = root.find(f"{{{ns}}}CODED_DATA_SECTION")
+    coded = root.find(f"{{{root_ns}}}CODED_DATA_SECTION")
+    if coded is None:
+        coded = root.find("CODED_DATA_SECTION")
     if coded is None:
         raise PackageError(
             f"Legacy notice without CODED_DATA_SECTION: {member_name}",
             code="unprojectable_notice",
         )
+
+    coded_ns = ""
+    if coded.tag.startswith("{"):
+        coded_ns = coded.tag[1 : coded.tag.index("}")]
+
+    def q(*names: str) -> str:
+        prefix = f"{{{coded_ns}}}" if coded_ns else ""
+        return "/".join(f"{prefix}{name}" for name in names)
 
     pub_raw = coded.findtext(q("REF_OJS", "DATE_PUB"))
     publication_date, publication_raw = _parse_date(pub_raw, member_name, "publication")
@@ -206,7 +219,12 @@ def _project_legacy(root: ET.Element, key, member_name: str, version: str) -> Pr
 
 
 def _project_eforms(root: ET.Element, key, member_name: str, version: str) -> ProjectedNotice:
-    pub_date_el = next(root.iter(f"{_EFBC}PublicationDate"), None)
+    publication = next(root.iter(f"{_EFAC}Publication"), None)
+    pub_date_el = (
+        publication.find(f"{_EFBC}PublicationDate")
+        if publication is not None
+        else None
+    )
     publication_date, publication_raw = _parse_date(
         pub_date_el.text if pub_date_el is not None else None, member_name, "publication"
     )

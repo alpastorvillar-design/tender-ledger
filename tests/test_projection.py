@@ -133,6 +133,15 @@ class LegacyProjectionTests(unittest.TestCase):
         self.assertEqual(p.source_format, "legacy")
         self.assertEqual(p.schema_version, "R2.0.8")
 
+    def test_unqualified_sections_under_a_namespaced_root_are_projected(self):
+        xml = legacy().replace(
+            b"<CODED_DATA_SECTION>", b'<CODED_DATA_SECTION xmlns="">', 1
+        )
+        p = project_notice("day/000995_2020.xml", xml)
+        self.assertEqual(p.publication_date, dt.date(2020, 1, 3))
+        self.assertEqual(p.buyer_country_iso, "PL")
+        self.assertEqual(p.primary_cpv, "79000000")
+
     def test_absent_country_and_cpv_are_marked_absent_not_null_guessed(self):
         p = project_notice("day/995_2020.xml", legacy(country="", cpv=""))
         self.assertIsNone(p.buyer_country)
@@ -166,6 +175,18 @@ class EformsProjectionTests(unittest.TestCase):
         self.assertEqual(p.publication_date_raw, "2020-01-03Z")
         self.assertEqual(p.dispatch_date, dt.date(2019, 12, 26))
         self.assertEqual(p.dispatch_date_raw, "2019-12-26+01:00")
+
+    def test_publication_date_comes_from_the_publication_block(self):
+        xml = eforms().replace(
+            b"<efac:Publication>",
+            b"<efac:NoticeResult><efac:FieldsPrivacy>"
+            b"<efbc:PublicationDate>2053-01-01Z</efbc:PublicationDate>"
+            b"</efac:FieldsPrivacy></efac:NoticeResult><efac:Publication>",
+            1,
+        )
+        p = project_notice("day/00000995_2020.xml", xml)
+        self.assertEqual(p.publication_date, dt.date(2020, 1, 3))
+        self.assertEqual(p.publication_date_raw, "2020-01-03Z")
 
     def test_buyer_country_resolved_from_contracting_party_org(self):
         p = project_notice("day/00000995_2020.xml", eforms(buyer_country="DEU"))
@@ -279,9 +300,10 @@ class ContractVersionTests(unittest.TestCase):
         self.assertIsInstance(CONTRACT_VERSION, str)
         self.assertTrue(CONTRACT_VERSION)
 
-    def test_contract_version_is_two(self):
-        # M3b's projection contract: official change references are now kept.
-        self.assertEqual(CONTRACT_VERSION, "2")
+    def test_contract_version_is_three(self):
+        # M3d's measured rehearsal fixed two source-format paths. Replays of
+        # captures projected with the earlier paths must therefore recapture.
+        self.assertEqual(CONTRACT_VERSION, "3")
 
 
 if __name__ == "__main__":
