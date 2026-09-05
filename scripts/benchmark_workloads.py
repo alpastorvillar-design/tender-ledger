@@ -75,7 +75,11 @@ def render_query(text: str, **params: str) -> str:
     literals -- the same convention ``psql -v name=value`` performs, and the
     one ``tests/test_queries.py`` already uses for the same query files."""
     for name, value in params.items():
-        text = text.replace(f":'{name}'", f"'{value}'")
+        # psycopg owns literal quoting here. Values come from CLI arguments,
+        # so surrounding them with quotes by hand would allow an apostrophe to
+        # terminate the literal and change the benchmark query.
+        literal = sql.Literal(value).as_string()
+        text = text.replace(f":'{name}'", literal)
     return text
 
 
@@ -107,6 +111,8 @@ def timed_repetitions(
     this raises -- a workload is not "benchmarked" if its own repetitions
     disagree on the answer.
     """
+    if warmup < 0:
+        raise ValueError("warmup must not be negative")
     if repetitions < 1:
         raise ValueError("repetitions must be at least 1")
     for _ in range(warmup):

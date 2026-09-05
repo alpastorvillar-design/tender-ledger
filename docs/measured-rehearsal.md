@@ -20,16 +20,17 @@ Windows 11 Pro, AMD Ryzen 7 7800X3D (16 logical processors host-side), 31.1 GiB
 RAM. PostgreSQL 17.11 in the project's own Compose stack, limited to 2 CPU /
 2 GiB as configured. Python 3.14.3. Host free disk stayed above 636 GiB
 throughout (gate: at least 100 GiB); the PostgreSQL data directory and the
-Docker WSL virtual disk grew by under 100 MiB combined -- nowhere near the
-150 GiB combined ceiling.
+Docker WSL virtual disk each grew by under 100 MiB -- two overlapping views
+of local storage, both nowhere near the 150 GiB ceiling.
 
 ## Finding: two real monthly-package shapes, neither fully anticipated
 
-`monthly/2020-01` and `monthly/2024-01` downloaded successfully (both are
-valid gzip-tar files under the declared byte budget) but failed archive
-validation: each top-level entry is a *nested* gzip-tar file, one per
-publication day (for example `01/20200131_2020022.tar.gz`, itself a valid
-gzip archive). The current walker (`packages.py`) only recognizes flat XML
+`monthly/2020-01` transferred completely but failed archive validation.
+A bounded 4 MiB ranged read of `monthly/2024-01` established the same outer
+layout without claiming full-file validation. Each has a top-level entry for
+a nested `.tar.gz` file, one per publication day (for example
+`01/20200131_2020022.tar.gz`; the sampled 2020 member had a gzip header).
+The current walker (`packages.py`) only recognizes flat XML
 members; a member that is not a regular XML file is an unconditional,
 archive-level rejection, by design (the same defense that rejects a symlink or
 an oversized member also rejects a nested archive it cannot recurse into).
@@ -53,12 +54,15 @@ independent of the nested-archive one above.
 | `monthly/2020-01` | nested `.tar.gz` per day | No -- archive-level |
 | `monthly/2020-02` | flat XML in a per-day directory | Yes |
 | `monthly/2023-11` | flat XML, includes an unrecognized eForms root | No -- member-level |
-| `monthly/2024-01` | nested `.tar.gz` per day (confirmed via a 4 MiB ranged read, not a full download) | No -- archive-level |
+| `monthly/2024-01` | outer `.tar.gz` member per day observed via a 4 MiB ranged read | No -- archive-level |
 | `daily/202300220` | flat XML | Yes (already known) |
 
-Neither failure corrupts state: `download_package` never persists bytes it
-cannot validate, so nothing reached `data/` for the three incompatible
-identities, and no capture, run or checkpoint row exists for them.
+Neither failure corrupts capture state: `download_package` never persists
+bytes it cannot validate, so nothing reached `data/` for the three
+incompatible identities and no capture or checkpoint exists for them. The
+failed manifest attempt did persist one resumable `monthly/2020-01` run at
+`phase = 'starting'`, including its bounded error; the other two identities
+have no run.
 
 Running `ingest-manifest` against the unmodified pilot manifest reproduces
 this cleanly and stops at the first entry, `monthly/2020-01`, exactly as
@@ -86,8 +90,9 @@ reached before the first incompatible one.
    notices against the live TED Search API (204 pages, zero differences,
    zero duplicates), and sealed the checkpoint.
 3. **Replayed**: a third run made zero HTTP requests of any kind and created
-   zero new captures, batches, attempts or checkpoints; the only real cost
-   was re-hashing the 139 MB artifact (about 26 s).
+   zero new captures, batches, attempts or checkpoints. It spent about 26 s
+   locally re-hashing and walking the complete 139 MB archive before trusting
+   the stored checkpoint.
 
 `daily/202300220` loaded, verified and checkpointed the same way, for
 completeness. The two loaded packages cover non-overlapping periods (a
@@ -115,11 +120,13 @@ Every workload's checksum and row count are identical before and after.
 | monthly_coverage_calendar | 0.7 | 0.7 | unchanged |
 | cross_package_overlap_audit | 156.5 | 158.9 | unchanged |
 
-Two of six workloads improved 19-28% where the planner actually switched to
-the candidate index; the rest are within run-to-run noise. At 53k rows the
-whole working set sits comfortably inside 1536 MB of cache, so this says
-little about behavior at the 1,000,000-row minimum gate and must be re-run
-there, exactly as [scale-and-sql.md](scale-and-sql.md) anticipated. Annual
+Two workloads improved by 19% and 28% after a plan change. A third plan also
+switched to an index scan while its median became 2% slower; the other three
+medians moved by less than 4%. At 53k rows the whole working set sits
+comfortably inside 1536 MB of cache, so these measurements do not justify an
+index decision and say little about behavior at the 1,000,000-row minimum
+gate. The protocol must be repeated there, exactly as
+[scale-and-sql.md](scale-and-sql.md) anticipated. Annual
 partitioning was not evaluated this round: real data covers only two
 populated months, too few to say anything honest about partition pruning.
 
@@ -139,5 +146,6 @@ Reusable, portable, fixture-tested harness:
   root allow-list, and a fresh survey of how common each real shape is across
   the archive, none of which this rehearsal implements.
 
-[scale-and-sql.md](scale-and-sql.md) and the roadmap in the top-level
-[README](../README.md) are unchanged pending that decision.
+The top-level [README](../README.md) and
+[scale-and-sql.md](scale-and-sql.md) link this incomplete rehearsal while
+retaining the unmet scale gates.

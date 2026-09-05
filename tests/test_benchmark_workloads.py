@@ -35,6 +35,10 @@ class RenderQueryTests(unittest.TestCase):
         rendered = bw.render_query(text, x="1", y="daily/202300220")
         self.assertEqual(rendered, "select * from t where a = '1' and b = 'daily/202300220'")
 
+    def test_quotes_a_parameter_as_data(self):
+        rendered = bw.render_query("select :'value'", value="a'; select 2; --")
+        self.assertEqual(rendered, "select 'a''; select 2; --'")
+
     def test_a_token_with_no_matching_param_is_left_untouched(self):
         rendered = bw.render_query("select :'only'", only="42")
         self.assertEqual(rendered, "select '42'")
@@ -74,6 +78,10 @@ class DeterminismTests(unittest.TestCase):
     def test_repetitions_must_be_positive(self):
         with self.assertRaises(ValueError):
             bw.timed_repetitions(self.conn, "select 1", warmup=0, repetitions=0)
+
+    def test_warmup_must_not_be_negative(self):
+        with self.assertRaises(ValueError):
+            bw.timed_repetitions(self.conn, "select 1", warmup=-1, repetitions=1)
 
 
 class RunBenchmarkTests(unittest.TestCase):
