@@ -18,9 +18,10 @@
 -- when there is no reference or its shape cannot be mapped safely to a
 -- publication identity. It is false for a publication-shaped reference whose
 -- target is not loaded, because that is a known answer rather than an unknown.
--- Order / tie-break: source_package_id, publication_year, publication_number,
--- ordinal -- ordinal is the reference's own stable document-order position, so
--- no further tie-break is needed within one notice.
+-- Order / tie-break: source_package_id, capture_id, publication_year,
+-- publication_number, ordinal. A package may have several complete historical
+-- captures containing the same notice and ordinal, so capture_id must separate
+-- them before the reference's document-order position can be deterministic.
 -- Parameters: none.
 -- Does not let you claim: that a resolved target is the same procedure, or a
 -- later version of the same notice UUID -- resolution here is deliberately
@@ -63,4 +64,5 @@ left join tl_read.distinct_notice target
         = target.publication_number
    and (regexp_match(r.value, '^([0-9]{1,8})-([1-9][0-9]{3})$'))[2]::bigint
         = target.publication_year
-order by h.source_package_id, h.publication_year, h.publication_number, r.ordinal;
+order by h.source_package_id, h.capture_id,
+         h.publication_year, h.publication_number, r.ordinal;

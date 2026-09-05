@@ -415,6 +415,34 @@ class OfficialChangeReferencesTests(QueryTestCase):
         rows = {r["publication_ref"]: r for r in self.references()}
         self.assertIsNone(rows["42-2023"]["change_reference_status"])
 
+    def test_historical_recaptures_have_a_total_order(self):
+        first = load_package(
+            self.conn,
+            write_package(
+                self.dir / "first",
+                [eforms_member(7, change_refs=[("2-2023", "notice-id-ref")])],
+            ),
+            "daily/history",
+        )
+        second = load_package(
+            self.conn,
+            write_package(
+                self.dir / "second",
+                [eforms_member(7, change_refs=[("2-2023", "notice-id-ref")])],
+            ),
+            "daily/history",
+            force_recapture=True,
+        )
+
+        rows = [
+            row for row in self.references()
+            if row["source_package_id"] == "daily/history"
+        ]
+        self.assertEqual(
+            [row["capture_id"] for row in rows],
+            [first.capture_id, second.capture_id],
+        )
+
 
 class CrossPackageOverlapAuditTests(QueryTestCase):
     def overlap(self, a, b):
