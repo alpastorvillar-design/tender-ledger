@@ -1,17 +1,14 @@
 # Scale and SQL requirements
 
 Status: acceptance plan for the historical workload. Archive inspection,
-transactional PostgreSQL loading, the projection v2 contract (official change
-references) and the six analytical workloads below are implemented on
-synthetic fixtures, with a verified daily load of 2,967 real notices under
-contract v1. A rehearsal against the five real packages of the
-pilot manifest loaded and verified three of them and published a fourth
-without coverage: **165,250 notices, 162,283 distinct**, which meets the
-100,000-notice rehearsal gate. See
+transactional PostgreSQL loading, the projection v3 contract and the six
+analytical workloads below are implemented on synthetic fixtures and exercised
+against five real daily/monthly packages. The complete pilot manifest produced
+**230,958 published observations and 227,991 distinct notices**, with exact
+identifier-set verification for every package and a zero-request full replay.
+This meets the 100,000-notice rehearsal gate. See
 [measured-rehearsal.md](measured-rehearsal.md). The minimum million-notice
-gate, historical coverage, and SQL benchmarks at that scale remain unmet, and
-two of the five identities are blocked by real archive content that needs a
-contract decision rather than a fix.
+gate, historical coverage, and SQL benchmarks at that scale remain unmet.
 
 ## Dataset and completion gates
 
@@ -50,12 +47,12 @@ The data model must support a documented notice grain, observed changes, source 
 
 1. [`monthly_notice_counts.sql`](../queries/monthly_notice_counts.sql) — monthly notice counts by country and primary CPV, with explicit treatment of missing values and multi-valued classifications.
 2. [`latest_capture_per_publication.sql`](../queries/latest_capture_per_publication.sql) — latest completed capture per publication, with deterministic capture ordering (`ROW_NUMBER` over `acquisition_ordinal desc, capture_id desc`). Grouping by procedure would answer a different question.
-3. [`official_change_references.sql`](../queries/official_change_references.sql) — supported official change references (contract v2, `efbc:ChangedNoticeIdentifier`) and their resolution against loaded identities, with explicit format coverage and unresolved targets.
+3. [`official_change_references.sql`](../queries/official_change_references.sql) — supported official change references (introduced in contract v2, `efbc:ChangedNoticeIdentifier`) and their resolution against loaded identities, with explicit format coverage and unresolved targets.
 4. [`acquisition_cutoff_state.sql`](../queries/acquisition_cutoff_state.sql) — the dataset as captured by this system at an acquisition-time cutoff, without presenting backfill ingestion order as official historical versions.
 5. [`monthly_coverage_calendar.sql`](../queries/monthly_coverage_calendar.sql) — coverage and ingestion freshness over a calendar axis with `LEFT JOIN`, distinguishing empty source periods, missing captures, retired checkpoints and unavailable verification.
 6. [`cross_package_overlap_audit.sql`](../queries/cross_package_overlap_audit.sql) — cross-package identity overlap and content discrepancies using `NOT EXISTS` (both directions, so neither package is assumed to be the other's subset) and `EXCEPT` (whole-row comparison) over publication keys.
 
-These six are implemented and fixture-tested against small synthetic datasets built for correctness and adversarial cases (duplicates, absent fields, unresolved references, retired checkpoints), and measured against 165,250 real notices — above the 100,000-notice rehearsal gate and still well below the minimum this section requires. `EXPLAIN (ANALYZE, BUFFERS)`, 20 repeated timings, equality of results before/after a candidate index, and an annual-partitioning comparison on an isolated copy all ran at that scale; see [measured-rehearsal.md](measured-rehearsal.md). They must be re-measured at the 1,000,000-notice minimum gate before any conclusion here is trusted.
+These six are implemented and fixture-tested against small synthetic datasets built for correctness and adversarial cases (duplicates, absent fields, unresolved references, retired checkpoints), and measured against 230,958 real observations (227,991 distinct notices) — above the 100,000-notice rehearsal gate and still well below the minimum this section requires. `EXPLAIN (ANALYZE, BUFFERS)`, 20 repeated timings, equality of results before/after candidate indexes, and an annual-partitioning comparison on an isolated copy all ran at that scale; see [measured-rehearsal.md](measured-rehearsal.md). They must be re-measured at the 1,000,000-notice minimum gate before any conclusion here is trusted.
 
 Extend buyer-level analysis only after verifying organization identifiers and join cardinality. Do not infer awards, expenditure, or supplier outcomes from notices that do not contain those facts.
 

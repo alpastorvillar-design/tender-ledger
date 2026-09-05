@@ -1,11 +1,12 @@
 # Notice projection contract
 
-`contract_version = 2`.
+`contract_version = 3`.
 
 The loader stores a small allow-listed projection of each notice, not the raw
 XML. Fields were derived from a real daily package (2023-11-15) containing legacy
-`R2.0.8`/`R2.0.9` and eForms SDK 1.3-1.9. Broader-era validation (2020-2022 is
-legacy-only; older eForms SDKs) happens at M3 against monthly artifacts.
+`R2.0.8`/`R2.0.9` and eForms SDK 1.3-1.9. Monthly packages from 2020, 2023 and
+2024 exercise flat and nested archive layouts, legacy documents and mixed
+legacy/eForms documents.
 
 ## Identity
 
@@ -19,7 +20,7 @@ eForms-only and null for legacy.
 
 | Field | Legacy (`TED_EXPORT`) | eForms (UBL) |
 | --- | --- | --- |
-| `publication_date` (required) | `CODED_DATA_SECTION/REF_OJS/DATE_PUB` (`YYYYMMDD`) | `efbc:PublicationDate` (`YYYY-MM-DDZ`) |
+| `publication_date` (required) | Direct child `CODED_DATA_SECTION/REF_OJS/DATE_PUB` (`YYYYMMDD`) | `efac:Publication/efbc:PublicationDate` (`YYYY-MM-DDZ`) |
 | `dispatch_date` (optional) | `CODED_DATA_SECTION/CODIF_DATA/DS_DATE_DISPATCH` | `cbc:IssueDate` |
 | `buyer_country` | `CODED_DATA_SECTION/NOTICE_DATA/ISO_COUNTRY/@VALUE` (alpha-2) | buyer org's `cac:PostalAddress/cac:Country/cbc:IdentificationCode` (alpha-3) |
 | `primary_cpv` / `additional_cpv` | `CODED_DATA_SECTION/NOTICE_DATA/ORIGINAL_CPV/@CODE` (first / rest) | `cac:ProcurementProject/cac:MainCommodityClassification` then `.../AdditionalCommodityClassification` |
@@ -29,6 +30,15 @@ The eForms buyer organisation is resolved by matching
 `cac:ContractingParty/cac:Party/cac:PartyIdentification/cbc:ID` against the
 `efac:Organizations/efac:Organization` entries; place-of-performance country is
 deliberately ignored.
+
+Contract v3 makes both publication-date paths structural instead of searching
+by local name anywhere in the document. Some eForms notices also contain a
+privacy date named `efbc:PublicationDate`; it is not the publication date and
+must never win because it appears first. Some legacy roots declare an R2.0.9
+namespace while their direct `CODED_DATA_SECTION` child resets to the empty
+namespace. The projection accepts those two observed section forms and then
+uses the section's own namespace for its descendants. It does not search for a
+similarly named element elsewhere.
 
 ## Supported roots
 
@@ -65,7 +75,7 @@ for eForms). `buyer_country_iso` is the alpha-2 form for the European codes that
 dominate TED, so country can be a single analytical axis. An unmapped code keeps
 `buyer_country` with status `present` and a null `buyer_country_iso`.
 
-## Official change references (`contract_version = 2`)
+## Official change references (introduced in contract v2)
 
 An eForms notice may declare that it corrects or supersedes another notice, via
 one or more `efbc:ChangedNoticeIdentifier` elements (located by local name

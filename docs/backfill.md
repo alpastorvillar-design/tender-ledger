@@ -1,13 +1,14 @@
 # Manifest and sequential backfill
 
 Status: a versioned manifest format and a sequential runner over `ingest`
-exist and are tested against fixtures and a local server. `manifests/m3-pilot.json`
-names five real identities; running it for real stopped at the first one,
-`monthly/2020-01`, which is not loadable by the current code -- see
-[measured-rehearsal.md](measured-rehearsal.md). Listing an identity in the
-manifest is not evidence it was downloaded, loaded or verified. That
-evidence, if it exists, is in `tl_read.package_ingest_status` and in a report
-this command wrote, not in the manifest file.
+exist and are tested against fixtures and a local server. The five real
+identities in `manifests/m3-pilot.json` have also completed end to end under
+projection contract v3; every package has an exact verified checkpoint, and a
+second complete run replayed all five without HTTP or new durable state. See
+[measured-rehearsal.md](measured-rehearsal.md). Listing an identity in a
+manifest is still not evidence it was downloaded, loaded or verified. That
+evidence is in `tl_read.package_ingest_status` and in a report the command
+wrote, not in the manifest file.
 
 ```sh
 python -m tender_ledger ingest-manifest --manifest manifests/m3-pilot.json
@@ -146,6 +147,6 @@ non-zero.
 Parallelism, date-range or calendar-driven manifest generation, a global
 retry across packages, a manifest-execution table, and any flag that would
 relax the resource budgets `ingest` already enforces per package. The
-100,000-notice rehearsal, the million-notice gate, storage/WAL/duration
-measurement, and the SQL benchmark are later slices; see
+100,000-notice rehearsal, storage measurements and SQL benchmark are complete;
+the million-notice gate and the wider historical run remain later slices. See
 [scale-and-sql.md](scale-and-sql.md).

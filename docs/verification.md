@@ -3,8 +3,9 @@
 Status: implemented for one published capture at a time, daily or monthly,
 against the TED Search API. Downloading packages over HTTP and refusing to treat
 one as processed until its coverage is confirmed are implemented on top of this,
-in [ingestion.md](ingestion.md). Historical coverage and benchmarks are later.
-Only a daily capture has ever been verified against the live source.
+in [ingestion.md](ingestion.md). Five pilot captures -- four monthly and one
+daily -- have been verified against the live source. Historical coverage beyond
+that pilot is later.
 
 "The archive loaded completely" and "the source agrees this is the whole issue"
 are different claims. The loader establishes the first. `verify` is what can

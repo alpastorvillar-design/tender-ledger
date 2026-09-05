@@ -86,6 +86,11 @@ keys point at. Migration `0005` (`contract_version = 2`) adds
 complete-history views; captures, batches, notices and the published pointer
 are otherwise unchanged by it.
 
+The current projection contract is v3. It changes two XML path-selection rules
+described in [projection.md](projection.md) and needs no schema migration;
+contract-aware ingest reprojects older checkpoints into a new capture instead
+of treating them as current.
+
 * `tl_read.notice` - one row per published notice per source package. Daily and
   monthly packages overlap, so a canonical identity can appear more than once
   here.
