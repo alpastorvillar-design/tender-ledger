@@ -128,6 +128,11 @@ def _inspection_limits(args: argparse.Namespace) -> Limits:
     may narrow it for an ad-hoc look at an archive, but widening it here would
     let a hand-typed number approve bytes the loader of that same package would
     refuse.
+
+    The policy's own limits are the starting point and only a flagged one is
+    replaced. Rebuilding the object from the flagged fields alone would give
+    every other limit its low-level default, so ``inspect`` would refuse an
+    archive that ``load`` of the same identity accepts.
     """
     if args.package_id:
         package_identity(args.package_id)
@@ -140,16 +145,15 @@ def _inspection_limits(args: argparse.Namespace) -> Limits:
     }
     chosen = {}
     for name, value in requested.items():
-        ceiling = getattr(policy, name)
         if value is None:
-            chosen[name] = ceiling
             continue
+        ceiling = getattr(policy, name)
         if args.package_id and value > ceiling:
             raise ValueError(
                 f"{name} {value} is above the policy of {args.package_id!r} ({ceiling})"
             )
         chosen[name] = value
-    return Limits(**chosen)
+    return dataclasses.replace(policy, **chosen)
 
 
 def _mib(value: int | None) -> int | None:

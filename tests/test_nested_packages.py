@@ -17,6 +17,10 @@ archive, so compression cannot hide work from the ceiling the identity set.
 import dataclasses
 import gzip
 import io
+import json
+import os
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -326,6 +330,42 @@ class NestedPolicyTests(unittest.TestCase):
         self.assertEqual(DAILY_POLICY.expanded_bytes, 512 * 1024**2)
         self.assertEqual(DAILY_POLICY.member_bytes, 8 * 1024**2)
         self.assertEqual(DAILY_POLICY.notices, 10_000)
+
+
+class NestedSurveyCliTests(NestedArchiveTestCase):
+    def run_cli(self, *args):
+        env = {**os.environ, "PYTHONPATH": "src", "PYTHONUTF8": "1"}
+        return subprocess.run(
+            [sys.executable, "-m", "tender_ledger", *args],
+            capture_output=True, text=True, env=env,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+
+    def test_the_command_line_survey_reads_the_identity_s_whole_policy(self):
+        """The CLI must not refuse an archive its own `load` would accept."""
+        path = self.archive([
+            daily_container("01/20200115_2020010.tar.gz", [legacy_2020(1)]),
+            daily_container("01/20200116_2020011.tar.gz", [legacy_2020(2)]),
+        ])
+        result = self.run_cli(
+            "inspect", str(path), "--package-id", MONTHLY, "--survey"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["compatible_for_load"])
+        self.assertEqual(payload["layout"], "nested")
+        self.assertEqual(payload["container_count"], 2)
+        self.assertEqual(payload["notice_count"], 2)
+
+    def test_the_same_archive_under_a_daily_identity_is_refused(self):
+        path = self.archive([daily_container("20200115.tar.gz", [legacy_2020(1)])])
+        result = self.run_cli("inspect", str(path), "--package-id", DAILY, "--survey")
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["compatible_for_load"])
+        self.assertEqual(
+            payload["incompatible_reasons"], {"nested_container_not_allowed": 1}
+        )
 
 
 class NestedLoadTests(NestedArchiveTestCase):

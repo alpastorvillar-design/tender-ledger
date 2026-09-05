@@ -6,6 +6,7 @@ kilobytes, so these tests prove which policy each path selected without moving
 the volume a real monthly package would.
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -28,6 +29,7 @@ from ted_fixtures import (
     write_package,
 )
 from tender_ledger import db
+from tender_ledger.__main__ import _inspection_limits
 from tender_ledger.config import load_config
 from tender_ledger.ingest import ingest_package
 from tender_ledger.package_contract import DAILY_POLICY, MONTHLY_POLICY
@@ -119,6 +121,31 @@ class InspectPolicyTests(PolicyPathTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("canonical package identity", result.stderr)
+
+    def test_an_unflagged_limit_keeps_the_policy_value_rather_than_a_default(self):
+        # Rebuilding the limits from only the flagged fields would silently give
+        # every other one the daily default, so `inspect` would refuse an
+        # archive its own `load` accepts.
+        for package, expected in ((DAILY, DAILY_POLICY), (MONTHLY, MONTHLY_POLICY)):
+            with self.subTest(package=package):
+                args = argparse.Namespace(
+                    package_id=package, max_compressed_mib=None, max_expanded_mib=None,
+                    max_member_mib=None, max_notices=None,
+                )
+                self.assertEqual(_inspection_limits(args), limits_for(package))
+                self.assertEqual(
+                    _inspection_limits(args).container_count, expected.container_count
+                )
+
+    def test_a_narrowing_flag_leaves_the_other_policy_limits_alone(self):
+        args = argparse.Namespace(
+            package_id=MONTHLY, max_compressed_mib=None, max_expanded_mib=None,
+            max_member_mib=None, max_notices=5,
+        )
+        limits = _inspection_limits(args)
+        self.assertEqual(limits.notices, 5)
+        self.assertEqual(limits.container_count, MONTHLY_POLICY.container_count)
+        self.assertEqual(limits.member_bytes, MONTHLY_POLICY.member_bytes)
 
 
 class LoadPolicyTests(PolicyPathTestCase):
