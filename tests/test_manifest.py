@@ -92,6 +92,20 @@ class ValidManifestTests(unittest.TestCase):
         )
         self.assertEqual([e.order for e in manifest.entries], [1, 2, 3, 4, 5])
 
+    def test_the_real_scale_manifest_parses_with_the_planned_slice(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        manifest = load_manifest(repo_root / "manifests" / "m3-scale.json")
+        identities = [e.source_package_id for e in manifest.entries]
+        self.assertEqual(
+            identities,
+            [f"monthly/2020-{month:02d}" for month in range(1, 13)]
+            + [f"monthly/2021-{month:02d}" for month in range(1, 13)]
+            + ["monthly/2023-11", "monthly/2024-01", "daily/202300220"],
+        )
+        self.assertEqual(
+            [e.order for e in manifest.entries], list(range(1, len(identities) + 1))
+        )
+
 
 class InvalidJsonTests(unittest.TestCase):
     def test_malformed_json_text_is_rejected(self):
