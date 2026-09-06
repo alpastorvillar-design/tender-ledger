@@ -1,9 +1,10 @@
 # Local PostgreSQL environment
 
 Status: PostgreSQL runtime verified on 2026-09-03 with Docker Desktop and WSL 2.
-The transactional loader (migrations `0001`-`0004`, capture/batch/publish), the
-coverage verifier and the daily ingest flow run against this database; the
-historical run does not.
+The transactional loader (migrations `0001`-`0005`, capture/batch/publish), the
+coverage verifier and the ingest flow run against PostgreSQL. The development
+database holds only the accepted daily sample; the million-notice run used a
+separate local database.
 
 ## Prerequisites
 
