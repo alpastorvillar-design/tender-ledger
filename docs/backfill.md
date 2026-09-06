@@ -1,18 +1,21 @@
 # Manifest and sequential backfill
 
 Status: a versioned manifest format and a sequential runner over `ingest`
-exist and are tested against fixtures and a local server. The five real
-identities in `manifests/m3-pilot.json` have also completed end to end under
-projection contract v3; every package has an exact verified checkpoint, and a
-second complete run replayed all five without HTTP or new durable state. See
-[measured-rehearsal.md](measured-rehearsal.md). Listing an identity in a
-manifest is still not evidence it was downloaded, loaded or verified. That
-evidence is in `tl_read.package_ingest_status` and in a report the command
-wrote, not in the manifest file.
+exist and are tested against fixtures and a local server. Two real manifests
+have been run end to end under projection contract v3: the five identities of
+`manifests/m3-pilot.json` (see [measured-rehearsal.md](measured-rehearsal.md))
+and the twenty-seven of `manifests/m3-scale.json` (see
+[million-notice-run.md](million-notice-run.md)). Twenty-six of the twenty-seven
+have an exact verified checkpoint and replay without HTTP or new durable state;
+the twenty-seventh stops the run, because the source cannot confirm its
+coverage. Listing an identity in a manifest is still not evidence it was
+downloaded, loaded or verified. That evidence is in
+`tl_read.package_ingest_status` and in a report the command wrote, not in the
+manifest file.
 
 ```sh
-python -m tender_ledger ingest-manifest --manifest manifests/m3-pilot.json
-python -m tender_ledger ingest-manifest --manifest manifests/m3-pilot.json --report report.json
+python -m tender_ledger ingest-manifest --manifest manifests/m3-scale.json
+python -m tender_ledger ingest-manifest --manifest manifests/m3-scale.json --report report.json
 ```
 
 Exit code 0 means every package in the manifest reported a current, processed
@@ -146,7 +149,9 @@ non-zero.
 
 Parallelism, date-range or calendar-driven manifest generation, a global
 retry across packages, a manifest-execution table, and any flag that would
-relax the resource budgets `ingest` already enforces per package. The
-100,000-notice rehearsal, storage measurements and SQL benchmark are complete;
-the million-notice gate and the wider historical run remain later slices. See
+relax the resource budgets `ingest` already enforces per package. There is also
+no way to skip an entry: a manifest whose source cannot confirm one package
+stops there, and continuing past it means running a manifest that does not name
+it. The million-notice gate, storage measurements and SQL benchmark are
+complete; the 2020-2025 historical run remains a later slice. See
 [scale-and-sql.md](scale-and-sql.md).

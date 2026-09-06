@@ -17,10 +17,13 @@ A versioned manifest format and a sequential runner compose `ingest` over an
 explicit, ordered list of packages, stopping at the first one that is not
 processed, with no manifest-level table or transaction of its own. Lint and
 the full test suite pass locally against real PostgreSQL, without skipped
-tests; the badge above reports the latest CI run on `main`. A five-package real
-data rehearsal completed under contract v3, including exact source verification,
-zero-request replay, SQL benchmarks and a partitioning experiment. The
-million-notice run and workflow orchestration are still pending.
+tests; the badge above reports the latest CI run on `main`. A twenty-seven
+package real data run reached **1,393,588 distinct notices whose coverage the
+source confirmed exactly**, with a real mid-load interruption and resume,
+zero-request replay, SQL benchmarks and a partitioning experiment at that scale.
+One package is blocked by a gap in TED's own monthly archive, described in
+[million-notice-run.md](docs/million-notice-run.md). Complete 2020-2025
+historical coverage and workflow orchestration are still pending.
 
 ## Problem
 
@@ -37,10 +40,10 @@ without double counting overlapping source packages.
 
 | Implemented | Evidence |
 | --- | --- |
-| Legacy XML and eForms inspection and projection | Five real daily/monthly packages: 230,958 published observations and 227,991 distinct notices |
+| Legacy XML and eForms inspection and projection | Twenty-seven real daily/monthly packages: 1,450,598 published observations and 1,447,631 distinct notices |
 | Durable batch loading and atomic publication | Recovery, reader visibility, concurrency, and corruption tests |
-| SQL over published, deduplicated notices | Monthly counts reconcile to all 2,967 loaded notices |
-| Coverage verification against the Search API | A live run matched all 2,967 identifiers of that capture across 13 requests |
+| SQL over published, deduplicated notices | Six workloads measured on 1,450,598 observations, with identical checksums across index variants |
+| Coverage verification against the Search API | Twenty-six packages matched identifier for identifier across 5,843 API pages |
 | Explicit coverage state | Verified, mismatch, unavailable and unconfirmed-empty are four different answers, each with its recorded evidence |
 | Bounded, recoverable package download | Truncation, oversized bodies, redirects off-origin, corrupt archives and 404s are all refused; interruptions restart from byte zero |
 | A checkpoint that only a complete flow can seal | Validated artifact plus published capture plus a named verified attempt, re-checked in one transaction and read back |
@@ -50,7 +53,8 @@ without double counting overlapping source packages.
 | Official change references as a relation, not a column | Every `efbc:ChangedNoticeIdentifier`, kept ordered and atomic with its notice; a real archive showed this is genuinely one-to-many |
 | A replay that checks its own contract version | A checkpoint sealed under an older projection contract is never replayed as processed, only reprojected under the current one |
 | Six analytical SQL workloads with correctness fixtures | Latest-capture ranking, change-reference resolution, acquisition cutoffs, a coverage calendar, and cross-package overlap auditing |
-| A versioned manifest and sequential backfill runner | Strict schema validation before I/O; all five pilot packages processed in order and then replayed with zero HTTP requests or new database state |
+| A versioned manifest and sequential backfill runner | Strict schema validation before I/O; twenty-six of twenty-seven scale packages processed in order and then replayed with zero acquisition requests or new database state |
+| A source disagreement the pipeline refuses to absorb | TED's API reports one May 2021 notice its own monthly archive omits; the capture stays unverified, no checkpoint is sealed, and the manifest stops there |
 
 ## Architecture
 
@@ -221,7 +225,7 @@ budgets and locking.
 ## Run a manifest of packages
 
 ```sh
-python -m tender_ledger ingest-manifest --manifest manifests/m3-pilot.json
+python -m tender_ledger ingest-manifest --manifest manifests/m3-scale.json
 ```
 
 `ingest-manifest` calls `ingest` once per package a versioned manifest names,
@@ -230,10 +234,14 @@ that is not processed -- the packages after that point are never attempted. It
 adds no manifest-level table or transaction: a second run over the same
 manifest replays every package whose checkpoint is still current and resumes
 whichever one was interrupted, using exactly the recovery `ingest` already
-has. [`manifests/m3-pilot.json`](manifests/m3-pilot.json) names the five real
-identities planned for the M3d rehearsal; listing them is not evidence any of
-them has been downloaded. See [manifest format and backfill](docs/backfill.md)
-for the schema, the report shape and what is deliberately not here yet.
+has. [`manifests/m3-scale.json`](manifests/m3-scale.json) names the twenty-seven
+identities of the million-notice run and
+[`manifests/m3-pilot.json`](manifests/m3-pilot.json) the five of the earlier
+rehearsal; listing an identity is not evidence it has been downloaded. A run of
+the scale manifest stops at `monthly/2021-05`, whose coverage the source cannot
+confirm -- see [the million-notice run](docs/million-notice-run.md). See
+[manifest format and backfill](docs/backfill.md) for the schema, the report
+shape and what is deliberately not here yet.
 
 ## Query the result
 
@@ -246,10 +254,11 @@ from tl_read.distinct_notice;
 ```
 
 [Monthly counts](queries/monthly_notice_counts.sql) groups those notices by
-publication month, buyer country, and primary CPV division. The verified daily
-load produced **611 groups whose counts sum to 2,967**. Missing classifications
-remain explicit. These counts describe published notices, not awarded contracts
-or procurement spending.
+publication month, buyer country, and primary CPV division: **34,330 groups**
+over the 1,447,631 distinct notices of the scale run, and 611 groups summing to
+2,967 over the single verified daily load. Missing classifications remain
+explicit. These counts describe published notices, not awarded contracts or
+procurement spending.
 
 [Diagnostics](queries/diagnostics.sql) exposes capture status, missing fields,
 schema versions, and source overlap. [Coverage status](queries/coverage_status.sql)
@@ -268,8 +277,9 @@ correctness fixture: the [latest complete observation per publication](queries/l
 [monthly coverage calendar](queries/monthly_coverage_calendar.sql), and a
 [cross-package overlap audit](queries/cross_package_overlap_audit.sql) using
 `NOT EXISTS` and `EXCEPT`. They are tested against synthetic fixtures and
-measured against 230,958 real observations (227,991 distinct notices), with matching checksums before and after
-a candidate index; see [measured-rehearsal.md](docs/measured-rehearsal.md) and
+measured against 1,450,598 real observations (1,447,631 distinct notices), with
+matching row counts and checksums before and after a candidate index; see
+[million-notice-run.md](docs/million-notice-run.md) and
 [scale-and-sql.md](docs/scale-and-sql.md).
 
 ## Verified evidence
@@ -279,13 +289,15 @@ a candidate index; see [measured-rehearsal.md](docs/measured-rehearsal.md) and
 - A real mixed daily package contained **2,967 distinct notices**: 1,813 legacy and 1,154 eForms. Its complete identifier set matched the API across 12 pages.
 - The inspector processed that package successfully; its checks are covered by automated tests.
 - That same real package (2,967 notices, 1,813 legacy + 1,154 eForms) was loaded into PostgreSQL as an M1 smoke: members, distinct keys, and loaded rows all reconciled at 2,967, a replay was a no-op, and every view reported `source_coverage_verified = false`.
-- The full test suite is **478 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against local test servers and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses, stale or internally inconsistent checkpoints, unbalanced nested locks, unknown counts supporting a verification claim, a privacy date shadowing an authoritative eForms publication date, and unqualified legacy sections below a namespaced root. The ingest tests interrupt the flow at each durable boundary -- including a real termination of a test-only PostgreSQL session during the checkpoint transaction -- resume from another connection, and compare the result with a clean run over the same bytes. Package-identity tests cover the derived URL, destination, interval and query for both kinds, the resource-policy invariants, and which policy each of `inspect`, `load`, `verify` and `ingest` selects; membership tests cover both edges of a month, a leap February, dates outside it, and a local capture whose rows do not belong to the month it names; survey tests cover an inventory of formats, roots and rejection reasons against archives that a load refuses outright, and require the survey's verdict to match what a load of the same archive actually does. Nested-container tests cover a compatible nested month, a daily package refusing nesting, a second nesting level, a mixed flat/nested archive, unsafe paths, symlinks, sparse and non-XML members inside a container, corrupt, truncated and over-long containers, each nesting limit, and a duplicate identity spanning two containers; acquisition tests require a failed download to report the requests and bytes it actually cost. Contract tests cover ordered change-reference projection, atomic persistence with an independently checked reference count, cancellation and recovery producing the same reference rows as a clean run, a checkpoint sealed under an older contract never replaying, and the six analytical workloads against synthetic fixtures. Manifest and benchmark tests cover strict validation before I/O, stop-on-first-failure sequencing, connection ownership, recovery, contract-aware replay, bounded reporting, private-path-safe provenance, deterministic result checksums and safe parameter rendering.
+- The full test suite is **479 tests**, run locally without skips: archive/projection tests, HTTP and pagination tests against local test servers and a scripted transport, and real-database tests for replay, durable batches, caller-transaction rejection, interrupted recapture, cancellation, publish visibility, corruption, A/B/A, retired members, concurrency, recovery equivalence, and coverage-verification outcomes. Regression tests reject late or truncated HTTP responses, stale or internally inconsistent checkpoints, unbalanced nested locks, unknown counts supporting a verification claim, a privacy date shadowing an authoritative eForms publication date, and unqualified legacy sections below a namespaced root. The ingest tests interrupt the flow at each durable boundary -- including a real termination of a test-only PostgreSQL session during the checkpoint transaction -- resume from another connection, and compare the result with a clean run over the same bytes. Package-identity tests cover the derived URL, destination, interval and query for both kinds, the resource-policy invariants, and which policy each of `inspect`, `load`, `verify` and `ingest` selects; membership tests cover both edges of a month, a leap February, dates outside it, and a local capture whose rows do not belong to the month it names; survey tests cover an inventory of formats, roots and rejection reasons against archives that a load refuses outright, and require the survey's verdict to match what a load of the same archive actually does. Nested-container tests cover a compatible nested month, a daily package refusing nesting, a second nesting level, a mixed flat/nested archive, unsafe paths, symlinks, sparse and non-XML members inside a container, corrupt, truncated and over-long containers, each nesting limit, and a duplicate identity spanning two containers; acquisition tests require a failed download to report the requests and bytes it actually cost. Contract tests cover ordered change-reference projection, atomic persistence with an independently checked reference count, cancellation and recovery producing the same reference rows as a clean run, a checkpoint sealed under an older contract never replaying, and the six analytical workloads against synthetic fixtures. Manifest and benchmark tests cover strict validation before I/O, stop-on-first-failure sequencing, connection ownership, recovery, contract-aware replay, bounded reporting, private-path-safe provenance, deterministic result checksums and safe parameter rendering.
 - **Live verification** against the TED Search API on 2026-09-03 matched all 2,967 identifiers in 13 requests, with no duplicates or differences. The check passed on a disposable copy before migration 0003 was applied to development. Verification of the development capture then committed `source_coverage_verified = true`, preserving all notice rows, batches, and the publication pointer. The canonical key digest matched earlier independent comparisons of the same issue.
 - A **bounded live ingest** of that same package on 2026-09-03 downloaded 12,377,691 bytes in one HTTP attempt (sha256 `f9ef1ffdcc78060fa7025f77f2eaf0b0808c0e0bc8c8dccb0722db3867a1f2a2`), validated and loaded 2,967 notices (1,813 legacy, 1,154 eForms), matched all 2,967 identifiers across 13 API requests with no duplicates or differences, and sealed a checkpoint: 10.4 s end to end. Re-running the command replayed the stored evidence with no request of any kind. It ran against a disposable database and a private temporary directory; the key digest matched the earlier independent comparison of the same issue.
 - An additional local recovery probe terminated its own PostgreSQL writer session after a committed batch. The retry kept the capture identity, skipped the committed batch, and published the remaining rows. This is a controlled failure test, not a production incident.
 - A **measured rehearsal** processed and verified all five real package identities in the pilot manifest under contract v3: `monthly/2020-01` (50,123), `monthly/2020-02` (50,522), `monthly/2023-11` (61,638), `monthly/2024-01` (65,708), and `daily/202300220` (2,967). Every package matched the TED Search API exactly, with no missing, extra or duplicate identifiers. Published total: **230,958 observations and 227,991 distinct notices**, which meets the 100,000-notice gate and not the million-notice one. A complete second manifest run replayed all five with zero HTTP and no new captures, runs, checkpoints or verification attempts. The daily package is an exact subset of `monthly/2023-11` (2,967 shared, none only in the day). The six workloads ran with 20 timed repetitions and matching checksums before and after candidate indexes, and annual partitioning was measured on an isolated copy. See [measured-rehearsal.md](docs/measured-rehearsal.md).
 
-Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03; the measured rehearsal on 2026-09-04 and 2026-09-05. No cloud deployment or historical performance benchmark at the million-notice scale has run.
+- The **million-notice run** processed the twenty-seven identities of `manifests/m3-scale.json` — the 24 monthly packages of 2020 and 2021 plus the three already-accepted modern samples. Twenty-six matched the TED Search API exactly across 5,843 API pages, giving **1,393,588 distinct notices with source-confirmed coverage** inside **1,450,598 published observations and 1,447,631 distinct notices**. A real backend termination after ten committed batches was resumed into the same capture with every earlier batch byte-identical, and the resumed content checksums equal to a clean load of the same bytes. Twenty-six entries replayed with zero acquisition requests and no new durable state. `monthly/2021-05` is the exception and stays unverified: the API reports `231901-2021` for that month, the monthly archive does not contain it, and the daily package `daily/202100089` does — a gap in the source, reproduced 71 minutes apart. See [million-notice-run.md](docs/million-notice-run.md).
+
+Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03; the measured rehearsal on 2026-09-04 and 2026-09-05; the million-notice run on 2026-09-06. No cloud deployment has run.
 
 See [design and source contract](docs/design.md), [projection contract](docs/projection.md), [transactional loading](docs/loading.md), [scale and SQL requirements](docs/scale-and-sql.md), and the [measured rehearsal](docs/measured-rehearsal.md).
 
@@ -319,19 +331,21 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
 
-1. At least one million distinct notices toward the 2020–2025 historical target.
-   The 100,000-notice rehearsal gate is met with all five pilot packages exactly
-   verified; the next manifest slice extends that evidence past one million.
-2. Repeat query plans, storage measurements and recovery evidence at that scale,
-   then add local Airflow orchestration.
+1. Complete 2020–2025 historical coverage. The million-notice gate is met with
+   twenty-six packages exactly verified; the remaining months are a scope
+   decision informed by the measurements in
+   [million-notice-run.md](docs/million-notice-run.md), not an assumption.
+2. Local Airflow orchestration over the verified flow, and an
+   artifact-retention policy the historical run would need.
 
-The current real-data validation covers all five pilot identities, including
-flat and nested monthly layouts, legacy and eForms notices, a real mid-load
-interruption and resume, exact per-package coverage, cross-package overlap and a
-zero-request full replay; see [measured-rehearsal.md](docs/measured-rehearsal.md).
-There is no publication calendar, artifact-retention policy or parallelism yet.
-Historical completeness, million-row performance and cloud execution have not
-been demonstrated.
+The current real-data validation covers twenty-seven package identities across
+2020, 2021, 2023 and 2024, including flat and nested monthly layouts, legacy and
+eForms notices, a real mid-load interruption and resume, exact per-package
+coverage, cross-package overlap, a zero-request replay and query plans at
+1.45 million rows. There is no publication calendar, artifact-retention policy
+or parallelism yet. Historical completeness and cloud execution have not been
+demonstrated, and one 2021 package remains unverifiable because TED's API and
+TED's monthly archive disagree about it.
 Source artifacts and database volumes stay outside Git. Synthetic fixtures test
 correctness and failures; they do not count toward the real-data scale target.
 The implemented projection excludes contact details and monetary amounts.

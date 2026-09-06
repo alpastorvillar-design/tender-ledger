@@ -192,7 +192,8 @@ adopted at this scale.
 - Production orchestration, distributed processing or cloud operation.
 - Awards, spending or supplier outcomes; this dataset models published notices.
 
-The next scale slice should extend the monthly manifest past one million
-distinct real notices, preserve exact per-package source verification, exercise
-recovery during that run, and repeat the resource and SQL measurements before
-accepting any physical-design change.
+The next scale slice did extend the monthly manifest past one million distinct
+real notices, preserving exact per-package source verification, exercising
+recovery during that run and repeating the resource and SQL measurements. Its
+results, including a package the source itself cannot reconcile, are in
+[million-notice-run.md](million-notice-run.md).
