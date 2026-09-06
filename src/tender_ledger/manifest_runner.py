@@ -151,7 +151,7 @@ def run_manifest(
         manifest=ManifestSummary(
             manifest_version=manifest.manifest_version,
             file_name=_manifest_file_name(manifest_path),
-            sha256=_manifest_sha256(manifest),
+            sha256=manifest_sha256(manifest),
             package_count=len(manifest.entries),
         ),
         started_at=started_at,
@@ -171,7 +171,7 @@ def _manifest_file_name(path: str | None) -> str | None:
     return normalized.rsplit("/", 1)[-1] or None
 
 
-def _manifest_sha256(manifest: Manifest) -> str:
+def manifest_sha256(manifest: Manifest) -> str:
     """Fingerprint the complete validated manifest without echoing its metadata."""
     document = {
         "manifest_version": manifest.manifest_version,
