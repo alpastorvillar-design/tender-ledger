@@ -199,6 +199,14 @@ never touches. The server's WAL position moved, but that is a cluster-wide
 counter shared with everything else on the instance, so the per-database counts
 are the evidence, not the LSN.
 
+### A refused manifest is a failed run, not a quiet one
+
+Triggering the Dag with `manifests/../data/nope.json` ended with
+`validate_manifest` failed on its only attempt -- it is not retried -- both
+later tasks `upstream_failed`, and the Dag run `failed`. The task log carries
+the reason, `must stay under manifests/`, and nothing downstream ran: no
+connection was opened and no byte was fetched on behalf of that request.
+
 ### Losing the process that was running the task
 
 The drill uses [`manifests/m4-retry-drill.json`](../manifests/m4-retry-drill.json),
