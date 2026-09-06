@@ -11,6 +11,7 @@ FROM apache/airflow:3.3.1-python3.13@sha256:0c4bcc0370e526de1b7892a3bf4343d260c6
 # Only what the package needs to build and install: no data, no .env, no tests.
 COPY --chown=airflow:root docker/airflow/constraints.txt /tmp/build/constraints.txt
 COPY --chown=airflow:root pyproject.toml /tmp/build/pyproject.toml
+COPY --chown=airflow:root LICENSE /tmp/build/LICENSE
 COPY --chown=airflow:root src /tmp/build/src
 
 RUN pip install --no-cache-dir --constraint /tmp/build/constraints.txt /tmp/build \
