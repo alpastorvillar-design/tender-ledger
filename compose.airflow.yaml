@@ -1,0 +1,151 @@
+# Local Airflow over the pipeline stack in compose.yaml.
+#
+#   docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait
+#
+# This file is an overlay and never replaces compose.yaml: the plain
+# `docker compose up -d --wait postgres` still starts the pipeline database on
+# its own, unchanged. Airflow keeps its metadata in a separate PostgreSQL
+# service with its own volume, so no Airflow table is ever created inside
+# tender_ledger or the scale database.
+#
+# Nothing here is a production deployment: one host, LocalExecutor, no TLS, a
+# UI bound to the loopback interface, and credentials from a local .env file.
+name: tender-ledger
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  image: tender-ledger-airflow:3.3.1
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # The one Dag here has no schedule, so nothing can start by itself; leaving
+    # it unpaused means a trigger is one command rather than two.
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?Run python scripts/create_local_env.py first}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:?Run python scripts/create_local_env.py first}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_METADATA_PASSWORD:?Run python scripts/create_local_env.py first}@airflow-metadata:5432/airflow
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # A task instance heartbeats every 10 s and is declared lost after 60 s
+    # instead of the default 300 s. That only changes how quickly a killed
+    # task process is noticed; it does not change what recovery does.
+    AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_SEC: "10"
+    AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT: "60"
+    AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL: "10"
+    # That timeout only covers a task whose process died while this scheduler
+    # kept running. A task lost with the scheduler itself is recovered by the
+    # orphaned-task reset, which runs on its own timer -- 300 s by default,
+    # which makes a local failure drill mostly waiting.
+    AIRFLOW__SCHEDULER__ORPHANED_TASKS_CHECK_INTERVAL: "30"
+    # Where the Dag finds manifests, archives and its own reports. The three
+    # directories under this root are the mounts below.
+    TL_ORCHESTRATION_HOME: /opt/tender-ledger
+    # The pipeline database, reached over the Compose network rather than the
+    # host port. TL_ORCHESTRATION_DB selects which database a run works on, so
+    # a manifest is pointed at the database that actually holds its packages.
+    TL_DB_HOST: postgres
+    TL_DB_PORT: "5432"
+    TL_DB_NAME: ${TL_ORCHESTRATION_DB:-tender_ledger}
+    TL_DB_USER: postgres
+    TL_DB_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/create_local_env.py first}
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./logs/airflow:/opt/airflow/logs
+    - ./manifests:/opt/tender-ledger/manifests:ro
+    - ./data:/opt/tender-ledger/data
+    - ./artifacts/orchestration:/opt/tender-ledger/reports
+    - ./tests_airflow:/opt/tender-ledger/tests_airflow:ro
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    airflow-metadata:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+  restart: "no"
+  stop_grace_period: 30s
+
+services:
+  airflow-metadata:
+    image: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:?Run python scripts/create_local_env.py first}
+    # No published port: Airflow's metadata is reachable only inside this
+    # Compose network, unlike the pipeline database an analyst queries.
+    volumes:
+      - airflow_metadata_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    mem_limit: 1g
+    cpus: 1.0
+    restart: "no"
+    stop_grace_period: 30s
+
+  # Runs once per `up`: applies Airflow's own migrations and creates the local
+  # UI account. The entrypoint performs both from these two variables.
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      airflow-metadata:
+        condition: service_healthy
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?Run python scripts/create_local_env.py first}
+    command: version
+    mem_limit: 1g
+    cpus: 1.0
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:${AIRFLOW_UI_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+    mem_limit: 1500m
+    cpus: 1.0
+
+  # LocalExecutor: this container runs the tasks as well as scheduling them,
+  # which is what makes killing it a real loss of the task process.
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+    mem_limit: 2g
+    cpus: 2.0
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname \"$${HOSTNAME}\""]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+    mem_limit: 1g
+    cpus: 1.0
+
+volumes:
+  airflow_metadata_data:

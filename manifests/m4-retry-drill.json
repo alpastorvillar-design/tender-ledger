@@ -1,0 +1,13 @@
+{
+  "manifest_version": 1,
+  "packages": [
+    {
+      "order": 1,
+      "source_package_id": "monthly/2024-01",
+      "notice_count_observed": 65708,
+      "compressed_bytes_observed": 291615691,
+      "observed_at": "2026-09-06",
+      "purpose": "one already-verified package, large enough to interrupt while it replays"
+    }
+  ]
+}

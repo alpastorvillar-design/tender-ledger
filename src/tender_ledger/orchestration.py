@@ -184,8 +184,8 @@ def ingest_manifest_command(
     return command
 
 
-def run_command(command: list[str], *, timeout: float, log: Callable[[str], None]) -> int:
-    """Run ``command`` to completion and return its exit code.
+def run_command(command: list[str], *, timeout: float, log: Callable[[str], None]) -> None:
+    """Run ``command`` to completion, failing on anything but exit code 0.
 
     Output is captured rather than streamed: the command this Dag runs writes
     its result to a report file and prints nothing until it is done, so there
@@ -211,7 +211,8 @@ def run_command(command: list[str], *, timeout: float, log: Callable[[str], None
         log(line[:_MAX_LOG_LINE_CHARACTERS])
     if len(lines) > _MAX_LOG_LINES:
         log(f"... {len(lines) - _MAX_LOG_LINES} further output lines suppressed")
-    return completed.returncode
+    if completed.returncode != 0:
+        raise OrchestrationError(f"The command exited {completed.returncode}")
 
 
 def summarize_report(document: dict, *, expected_sha256: str, expected_entries: int) -> dict:
@@ -270,6 +271,11 @@ def checkpoint_summary(conn: psycopg.Connection, identities: Sequence[str]) -> d
     database what is true now, through the same public view an analyst reads.
     A checkpoint a later re-acquisition or a later failed coverage check has
     retired is not accepted here, whatever the report said.
+
+    ``checkpoint_notices`` sums each package's own count, so a notice carried
+    by two overlapping packages is counted twice. It says how much these
+    checkpoints account for, not how many distinct notices exist --
+    ``tl_read.distinct_notice`` answers that.
     """
     wanted = list(dict.fromkeys(identities))
     with conn.cursor() as cur:
@@ -292,7 +298,7 @@ def checkpoint_summary(conn: psycopg.Connection, identities: Sequence[str]) -> d
         )
     return {
         "packages": len(wanted),
-        "notices": sum(rows[identity][1] or 0 for identity in wanted),
+        "checkpoint_notices": sum(rows[identity][1] or 0 for identity in wanted),
     }
 
 

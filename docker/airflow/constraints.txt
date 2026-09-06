@@ -1,0 +1,10 @@
+# Versions the local Airflow image is built with.
+#
+# Airflow is pinned here so installing this project inside the official image
+# can never resolve a different Airflow version underneath the scheduler. The
+# psycopg pins are the same ones ../../constraints.txt records for the
+# repository, so the code talks to PostgreSQL through the driver it was tested
+# with in CI.
+apache-airflow==3.3.1
+psycopg==3.3.5
+psycopg-binary==3.3.5

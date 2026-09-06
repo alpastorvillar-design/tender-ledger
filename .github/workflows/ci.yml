@@ -51,6 +51,6 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e ".[dev]" -c constraints.txt
       - name: Lint
-        run: python -m ruff check src tests scripts --no-cache
+        run: python -m ruff check src tests scripts dags tests_airflow --no-cache
       - name: Test with PostgreSQL (no skips)
         run: python scripts/run_tests.py

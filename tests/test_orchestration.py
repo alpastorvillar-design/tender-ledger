@@ -202,15 +202,25 @@ class RunCommandTests(unittest.TestCase):
     def setUp(self):
         self.logged: list[str] = []
 
-    def test_reports_the_exit_code_and_the_output_of_the_child(self):
-        code = run_command(
-            [sys.executable, "-c", "import sys; print('loaded 26'); sys.exit(3)"],
+    def test_logs_the_output_of_a_child_that_succeeded(self):
+        run_command(
+            [sys.executable, "-c", "print('replayed 26')"],
             timeout=60,
             log=self.logged.append,
         )
 
-        self.assertEqual(code, 3)
-        self.assertIn("loaded 26", "\n".join(self.logged))
+        self.assertIn("replayed 26", "\n".join(self.logged))
+
+    def test_fails_on_a_non_zero_exit_and_still_logs_what_the_child_said(self):
+        child = "import sys; print('stopped at 17'); sys.exit(3)"
+
+        with self.assertRaises(OrchestrationError) as caught:
+            run_command(
+                [sys.executable, "-c", child], timeout=60, log=self.logged.append
+            )
+
+        self.assertIn("3", str(caught.exception))
+        self.assertIn("stopped at 17", "\n".join(self.logged))
 
     def test_kills_a_child_that_outlives_its_timeout(self):
         with TemporaryDirectory() as directory:
@@ -234,11 +244,8 @@ class RunCommandTests(unittest.TestCase):
     def test_bounds_the_output_it_logs(self):
         child = "print('x' * 5000)\nfor line in range(500): print(line)"
 
-        code = run_command(
-            [sys.executable, "-c", child], timeout=60, log=self.logged.append
-        )
+        run_command([sys.executable, "-c", child], timeout=60, log=self.logged.append)
 
-        self.assertEqual(code, 0)
         self.assertLessEqual(len(self.logged), 202)
         self.assertLessEqual(max(len(line) for line in self.logged), 1000)
         self.assertIn("suppressed", self.logged[-1])
@@ -396,7 +403,9 @@ class CheckpointSummaryTests(unittest.TestCase):
 
         summary = checkpoint_summary(self.conn, ["daily/202300220"])
 
-        self.assertEqual(summary, {"packages": 1, "notices": len(self.NUMBERS)})
+        self.assertEqual(
+            summary, {"packages": 1, "checkpoint_notices": len(self.NUMBERS)}
+        )
 
     def test_refuses_a_package_the_status_view_has_never_heard_of(self):
         self.ingest()
