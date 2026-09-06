@@ -28,6 +28,14 @@ An independent header inventory on the same date found all 72 monthly packages, 
 
 The minimum gate alone does not establish complete historical coverage. Completing the project requires either the historical target or a documented scope decision explaining the measured constraint and exact coverage achieved. An unmet minimum gate remains unfinished work.
 
+The accepted portfolio scope takes that second path. It contains the 26 packages
+with exact checkpoints and 1,393,588 distinct notices, while retaining the
+27-package source audit as evidence of the May 2021 disagreement. The remaining
+46 monthly archives stay as an optional historical extension: the measured
+slice already covers both schema eras and archive layouts, recovery, overlap,
+SQL and resource behavior, and more volume would not satisfy another completion
+gate. This is a scope boundary, not a claim of complete 2020-2025 coverage.
+
 Count notices, observations, lots, organizations, and raw records separately. Repeated ingestion, multiple languages, expanded joins, or synthetic duplication must not inflate the distinct-notice claim. Synthetic fixtures are useful for correctness and adversarial cases; they do not count toward real-data scale.
 
 ## Historical loading and resources

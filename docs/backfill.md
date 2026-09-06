@@ -159,5 +159,6 @@ no way to skip an entry: a manifest whose source cannot confirm one package
 stops there. The verified scale manifest is a separate, explicit source
 selection that omits the documented mismatch; the runner never skips it
 implicitly. The million-notice gate, storage measurements and SQL benchmark are
-complete; the 2020-2025 historical run remains a later slice. See
+complete. The accepted portfolio scope is the 26-package verified manifest;
+the full 2020-2025 historical run remains an optional extension. See
 [scale-and-sql.md](scale-and-sql.md).

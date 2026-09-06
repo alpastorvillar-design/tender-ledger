@@ -23,8 +23,9 @@ source confirmed exactly**, with a real mid-load interruption and resume,
 a complete 26-package replay without HTTP, SQL benchmarks and a partitioning
 experiment at that scale.
 One package is blocked by a gap in TED's own monthly archive, described in
-[million-notice-run.md](docs/million-notice-run.md). Complete 2020-2025
-historical coverage and workflow orchestration are still pending.
+[million-notice-run.md](docs/million-notice-run.md). The accepted data scope is
+the 26 exactly reconciled packages; full 2020-2025 coverage remains a documented
+extension. Workflow orchestration is still pending.
 
 ## Problem
 
@@ -336,12 +337,14 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
 
-1. Complete 2020–2025 historical coverage. The million-notice gate is met with
-   twenty-six packages exactly verified; the remaining months are a scope
-   decision informed by the measurements in
-   [million-notice-run.md](docs/million-notice-run.md), not an assumption.
-2. Local Airflow orchestration over the verified flow, and an
-   artifact-retention policy the historical run would need.
+1. Add local Airflow orchestration over the verified flow and define artifact,
+   report, log and metadata retention.
+2. Keep complete 2020–2025 coverage as an optional extension. The accepted
+   portfolio scope is the 26 exactly verified packages: it exceeds one million,
+   covers the required formats and layouts, and has measured recovery, SQL and
+   resource behavior. The remaining 46 monthly archives would add volume but no
+   new completion gate; the source gap also prevents one strict manifest from
+   finishing unchanged.
 
 The current real-data validation covers twenty-seven package identities across
 2020, 2021, 2023 and 2024, including flat and nested monthly layouts, legacy and

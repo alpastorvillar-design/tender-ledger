@@ -339,6 +339,12 @@ in that state should be represented — and whether an archive gap that the dail
 packages can fill should be filled — is a design question, not a capacity one,
 and it is the prerequisite for the historical run rather than more hardware.
 
+For the portfolio delivery, the data scope therefore closes at the 26 exactly
+verified packages. They already exceed the million-notice gate and exercise the
+required schema eras, archive layouts, overlap, recovery and SQL workloads. The
+remaining 46 monthly archives are an optional extension; leaving them unrun is
+recorded explicitly and is not presented as historical completeness.
+
 ## What this run does not establish
 
 - Complete 2020-2025 historical coverage; 26 of 72 monthly packages are loaded,
