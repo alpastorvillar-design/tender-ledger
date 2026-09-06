@@ -78,6 +78,9 @@ The manifest parameter is a repository-relative path that has to stay under
 `manifests/`, exist, and pass the same strict schema the command applies. An
 absolute path, a traversal, a path outside that directory, an unparseable
 document and an unknown key are all refused before any connection is opened.
+The validated digest is passed to `ingest-manifest`, which checks it again before
+opening PostgreSQL or making a request; a file changed between Airflow tasks is
+therefore refused before it can process a different package list.
 The default is
 [`manifests/m3-scale-verified.json`](../manifests/m3-scale-verified.json), the
 26 packages whose coverage the source confirmed exactly.

@@ -181,11 +181,23 @@ class IngestManifestCommandTests(unittest.TestCase):
         }
 
         plain = ingest_manifest_command(**options)
-        tuned = ingest_manifest_command(**options, batch_size=250, lock_wait=True)
+        digest = "a" * 64
+        tuned = ingest_manifest_command(
+            **options,
+            batch_size=250,
+            lock_wait=True,
+            expected_sha256=digest,
+        )
 
         self.assertNotIn("--batch-size", plain)
         self.assertNotIn("--lock-wait", plain)
-        self.assertEqual(tuned[len(plain):], ["--batch-size", "250", "--lock-wait"])
+        self.assertEqual(
+            tuned[len(plain):],
+            [
+                "--batch-size", "250", "--lock-wait",
+                "--expected-manifest-sha256", digest,
+            ],
+        )
 
     def test_refuses_a_batch_size_that_is_not_a_positive_number(self):
         for batch_size in (0, -1, "500"):
@@ -196,6 +208,15 @@ class IngestManifestCommandTests(unittest.TestCase):
                     data_dir=Path("data"),
                     batch_size=batch_size,
                 )
+
+    def test_refuses_an_invalid_expected_digest(self):
+        with self.assertRaises(OrchestrationError):
+            ingest_manifest_command(
+                manifest=Path("manifests/pilot.json"),
+                report=Path("reports/report.json"),
+                data_dir=Path("data"),
+                expected_sha256="not-a-digest",
+            )
 
 
 class RunCommandTests(unittest.TestCase):

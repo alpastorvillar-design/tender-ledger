@@ -162,6 +162,7 @@ def ingest_manifest_command(
     data_dir: Path,
     batch_size: int | None = None,
     lock_wait: bool = False,
+    expected_sha256: str | None = None,
     executable: str = sys.executable,
 ) -> list[str]:
     """The argument vector for the public ``ingest-manifest`` command.
@@ -181,6 +182,15 @@ def ingest_manifest_command(
         command += ["--batch-size", str(batch_size)]
     if lock_wait:
         command.append("--lock-wait")
+    if expected_sha256 is not None:
+        if len(expected_sha256) != 64 or any(
+            character not in string.hexdigits for character in expected_sha256
+        ):
+            raise OrchestrationError(
+                f"expected_sha256 must be a 64-character hexadecimal digest:"
+                f" {expected_sha256!r}"
+            )
+        command += ["--expected-manifest-sha256", expected_sha256.lower()]
     return command
 
 

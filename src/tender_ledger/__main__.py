@@ -117,6 +117,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--lock-wait", action="store_true",
         help="wait for concurrent work on a package instead of failing fast",
     )
+    ingest_manifest.add_argument(
+        "--expected-manifest-sha256",
+        help=argparse.SUPPRESS,
+    )
 
     return parser
 
@@ -296,12 +300,28 @@ def _cmd_status(args: argparse.Namespace) -> int:
 def _cmd_ingest_manifest(args: argparse.Namespace) -> int:
     from . import db
     from .manifest import ManifestError, load_manifest
-    from .manifest_runner import report_to_dict, run_manifest, write_report_file
+    from .manifest_runner import (
+        manifest_sha256,
+        report_to_dict,
+        run_manifest,
+        write_report_file,
+    )
 
     try:
         manifest = load_manifest(args.manifest)
     except ManifestError as exc:
         print(f"Manifest rejected: {exc}", file=sys.stderr)
+        return 1
+
+    if (
+        args.expected_manifest_sha256 is not None
+        and manifest_sha256(manifest) != args.expected_manifest_sha256
+    ):
+        print(
+            "Manifest rejected: its sha256 does not match the version validated"
+            " by the orchestrator",
+            file=sys.stderr,
+        )
         return 1
 
     def ingest_options(_entry):

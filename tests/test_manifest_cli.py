@@ -27,6 +27,8 @@ from ted_fixtures import (
 from tender_ledger import db
 from tender_ledger.config import load_config
 from tender_ledger.ingest import ingest_package
+from tender_ledger.manifest import load_manifest
+from tender_ledger.manifest_runner import manifest_sha256
 
 DAILY_OJS = "220/2023"
 
@@ -138,6 +140,21 @@ class InvalidManifestTests(ManifestCliTests):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Manifest rejected", result.stderr)
 
+    def test_a_manifest_changed_after_orchestrator_validation_is_rejected_before_database_use(self):
+        path = self.write_manifest("changed.json", ["daily/202300220"])
+
+        result = self.run_cli(
+            "ingest-manifest",
+            "--manifest", str(path),
+            "--expected-manifest-sha256", "f" * 64,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not match", result.stderr)
+        self.assertEqual(
+            self.conn.execute("select count(*) from tl_work.ingest_run").fetchone()[0], 0
+        )
+
 
 class StdoutAndExitCodeTests(ManifestCliTests):
     def test_a_completed_manifest_prints_json_to_stdout_and_exits_zero(self):
@@ -145,7 +162,10 @@ class StdoutAndExitCodeTests(ManifestCliTests):
         manifest = self.write_manifest("m.json", ["daily/202300220"])
 
         result = self.run_cli(
-            "ingest-manifest", "--manifest", str(manifest), "--data-dir", str(self.data_dir)
+            "ingest-manifest",
+            "--manifest", str(manifest),
+            "--data-dir", str(self.data_dir),
+            "--expected-manifest-sha256", manifest_sha256(load_manifest(manifest)),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)

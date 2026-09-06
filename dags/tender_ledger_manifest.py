@@ -93,6 +93,7 @@ def ingest_manifest(plan: dict) -> dict:
         manifest=resolve_manifest_path(workspace.home, plan["manifest"]),
         report=report,
         data_dir=workspace.data,
+        expected_sha256=plan["sha256"],
     )
     log.info("Ingesting %s into report %s", plan["manifest"], report.name)
     started = dt.datetime.now(dt.UTC)
