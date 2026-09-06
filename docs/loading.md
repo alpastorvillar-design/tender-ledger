@@ -3,8 +3,8 @@
 Status: implemented for a single package into an unpartitioned PostgreSQL
 baseline. Coverage against the Search API is a separate command, described in
 [verification.md](verification.md); acquiring the archive and checkpointing the
-whole flow is a third, described in [ingestion.md](ingestion.md). The historical
-run and orchestration are later slices.
+whole flow is a third, described in [ingestion.md](ingestion.md). Scheduling a
+run of several packages is [local orchestration](orchestration.md).
 
 ## Data flow
 
@@ -243,8 +243,8 @@ filesystem paths are never reported.
 ## Deliberately deferred
 
 Annual partitioning (the baseline keeps year in the natural key so a partitioned
-table can be proven equivalent later), indexes tuned against measured plans,
-and Airflow.
+table can be proven equivalent later), and indexes tuned against measured
+plans.
 The HTTP downloader and the coverage checkpoint now exist; see
 [ingestion.md](ingestion.md). A sequential runner over an explicit, ordered
 list of packages now exists too; see [backfill.md](backfill.md) -- it has not

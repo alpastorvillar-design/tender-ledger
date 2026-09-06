@@ -90,4 +90,5 @@ The implemented inspector checks gzip CRC and trailer completion, validates supp
 - A → B → A recapture remains distinguishable from a retry.
 - Recovery produces the same records as a clean execution over identical artifacts.
 
-Airflow follows the verified CLI. Scale, SQL, and recovery requirements remain in [scale-and-sql.md](scale-and-sql.md).
+Airflow followed the verified CLI and calls it rather than replacing it; see
+[orchestration.md](orchestration.md). Scale, SQL, and recovery requirements remain in [scale-and-sql.md](scale-and-sql.md).

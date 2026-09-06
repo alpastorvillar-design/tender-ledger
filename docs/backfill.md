@@ -156,7 +156,9 @@ Parallelism, date-range or calendar-driven manifest generation, a global
 retry across packages, a manifest-execution table, and any flag that would
 relax the resource budgets `ingest` already enforces per package. There is also
 no way to skip an entry: a manifest whose source cannot confirm one package
-stops there. The verified scale manifest is a separate, explicit source
+stops there. Scheduling, retrying and reporting a manifest run belong to
+[local orchestration](orchestration.md), which calls this command once and adds
+no state of its own either. The verified scale manifest is a separate, explicit source
 selection that omits the documented mismatch; the runner never skips it
 implicitly. The million-notice gate, storage measurements and SQL benchmark are
 complete. The accepted portfolio scope is the 26-package verified manifest;

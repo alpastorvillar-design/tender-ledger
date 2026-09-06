@@ -325,8 +325,8 @@ API-reported notices of the historical target:
 
 Neither storage nor time is the obstacle: the projection sits far under the
 150 GiB operating ceiling and inside a single long session. Capacity does not
-force artifact deletion, although the historical run still needs an explicit
-retention policy for repeatability and local disk management. Two caveats
+force artifact deletion; the retention policy that keeps a historical run
+repeatable is in [orchestration.md](orchestration.md#retention). Two caveats
 belong with those numbers. The
 rates come from 2020 and 2021, and later years are larger per package, so the
 time estimate is optimistic. And verification cost is set by the source — one

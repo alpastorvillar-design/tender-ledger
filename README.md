@@ -25,7 +25,9 @@ experiment at that scale.
 One package is blocked by a gap in TED's own monthly archive, described in
 [million-notice-run.md](docs/million-notice-run.md). The accepted data scope is
 the 26 exactly reconciled packages; full 2020-2025 coverage remains a documented
-extension. Workflow orchestration is still pending.
+extension. A local Airflow 3.3.1 stack now triggers that manifest, retries a
+task whose process is lost, and refuses to report success unless the status view
+still shows a current checkpoint for every package it named.
 
 ## Problem
 
@@ -56,6 +58,7 @@ without double counting overlapping source packages.
 | A replay that checks its own contract version | A checkpoint sealed under an older projection contract is never replayed as processed, only reprojected under the current one |
 | Six analytical SQL workloads with correctness fixtures | Latest-capture ranking, change-reference resolution, acquisition cutoffs, a coverage calendar, and cross-package overlap auditing |
 | A versioned manifest and sequential backfill runner | Strict schema validation before I/O; a 26-package verified manifest completes and replays without HTTP or new database state, while the 27-package audit manifest retains the known source gap |
+| Local orchestration that owns no pipeline state | Airflow 3.3.1 runs a manifest as one unit, recovers a task whose container was killed mid-run, and re-reads the status view before reporting success |
 | A source disagreement the pipeline refuses to absorb | TED's API reports one May 2021 notice its own monthly archive omits; the capture stays unverified, no checkpoint is sealed, and the manifest stops there |
 
 ## Architecture
@@ -77,15 +80,17 @@ Python implements archive handling, ingestion and verification. PostgreSQL store
 notice data and transactional state; Docker Compose provides the local database.
 A restricted reader role sees published notice rows while incomplete replacements
 remain internal. The filesystem and the database share no transaction, so the
-ingest run records each durable step and recovers from it; Airflow will later
-coordinate the verified workflow.
+ingest run records each durable step and recovers from it. A local Airflow
+stack triggers, retries and reports that flow while owning none of its state,
+keeping its own metadata in a separate database.
 
 See [source and design decisions](docs/design.md),
 [transaction boundaries and recovery](docs/loading.md),
 [coverage verification](docs/verification.md),
 [download, recovery and checkpoint](docs/ingestion.md),
-[field projection](docs/projection.md), and
-[the manifest format and sequential backfill runner](docs/backfill.md).
+[field projection](docs/projection.md),
+[the manifest format and sequential backfill runner](docs/backfill.md), and
+[local orchestration](docs/orchestration.md).
 
 ## Quick start
 
@@ -249,6 +254,27 @@ coverage the source cannot confirm -- see
 [manifest format and backfill](docs/backfill.md) for the schema, the report
 shape and what is deliberately not here yet.
 
+## Orchestrate a manifest run
+
+```sh
+docker compose -f compose.yaml -f compose.airflow.yaml up -d --wait
+docker compose -f compose.yaml -f compose.airflow.yaml exec airflow-scheduler     airflow dags trigger tender_ledger_manifest --run-id my-run
+```
+
+A local Apache Airflow 3.3.1 stack schedules, retries and reports one manifest
+run. It owns none of the pipeline's state: the Dag has no schedule, allows one
+run at a time, and calls `ingest-manifest` exactly once as a child process, so
+acquisition, loading, coverage and checkpoints stay where they already were.
+Airflow keeps its own metadata in a separate PostgreSQL service and volume, and
+`docker compose up -d --wait postgres` still starts the pipeline database alone.
+
+The run validates the manifest before opening anything, runs the command, and
+then re-reads `tl_read.package_ingest_status`: a checkpoint retired between the
+command finishing and the summary running fails the run even though the command
+exited 0. [Local orchestration](docs/orchestration.md) describes the stack, the
+retry evidence, the retention policy, and what running this locally does not
+demonstrate.
+
 ## Query the result
 
 The consumption grain is one canonical publication per row, even when daily and
@@ -303,6 +329,8 @@ matching row counts and checksums before and after a candidate index; see
 
 - The **million-notice run** processed the twenty-seven identities of `manifests/m3-scale.json` — the 24 monthly packages of 2020 and 2021 plus the three already-accepted modern samples. Twenty-six matched the TED Search API exactly across 5,843 API pages, giving **1,393,588 distinct notices with source-confirmed coverage** inside **1,450,598 published observations and 1,447,631 distinct notices**. A real backend termination after ten committed batches was resumed into the same capture with every earlier batch byte-identical, and the resumed content checksums equal to a clean load of the same bytes. The corresponding 26-entry verified manifest then replayed completely without HTTP or new durable state. `monthly/2021-05` is the exception and stays unverified: the API reports `231901-2021` for that month, the monthly archive does not contain it, and the daily package `daily/202100089` does — a gap in the source, reproduced independently. See [million-notice-run.md](docs/million-notice-run.md).
 
+- **Local orchestration** ran the 26-package verified manifest through Airflow 3.3.1 on 2026-09-06: three tasks, all successful, 26 `replayed`, **0 HTTP attempts and 0 bytes downloaded** in 640.0 s, and every checkpoint still current when the summary task re-read the status view. Captures, rows, batches, runs, checkpoints, verification attempts and change references were identical in both pipeline databases before and after. Killing the container that executes the task mid-run left a failed first attempt and a successful second one **50 seconds later**, and that retry replayed the package -- same run, capture and verification attempt, 0 requests, no new durable state.
+
 Inspector checks were performed on 2026-09-02; the loader smoke on 2026-09-03; the measured rehearsal on 2026-09-04 and 2026-09-05; the million-notice run on 2026-09-06. No cloud deployment has run.
 
 See [design and source contract](docs/design.md), [projection contract](docs/projection.md), [transactional loading](docs/loading.md), [scale and SQL requirements](docs/scale-and-sql.md), and the [measured rehearsal](docs/measured-rehearsal.md).
@@ -325,7 +353,7 @@ produce a successful integration result. No TED download is part of CI.
 To run the same lint and test commands locally after the environment setup:
 
 ```sh
-python -m ruff check src tests scripts --no-cache
+python -m ruff check src tests scripts dags tests_airflow --no-cache
 python scripts/run_tests.py
 ```
 
@@ -337,9 +365,7 @@ PostgreSQL 17.11; the badge above reports the current state of `main`.
 
 ## Roadmap and limits
 
-1. Add local Airflow orchestration over the verified flow and define artifact,
-   report, log and metadata retention.
-2. Keep complete 2020–2025 coverage as an optional extension. The accepted
+1. Keep complete 2020–2025 coverage as an optional extension. The accepted
    portfolio scope is the 26 exactly verified packages: it exceeds one million,
    covers the required formats and layouts, and has measured recovery, SQL and
    resource behavior. The remaining 46 monthly archives would add volume but no
@@ -350,9 +376,11 @@ The current real-data validation covers twenty-seven package identities across
 2020, 2021, 2023 and 2024, including flat and nested monthly layouts, legacy and
 eForms notices, a real mid-load interruption and resume, exact per-package
 coverage, cross-package overlap, a zero-request replay and query plans at
-1.45 million rows. There is no publication calendar, artifact-retention policy
-or parallelism yet. Historical completeness and cloud execution have not been
-demonstrated, and one 2021 package remains unverifiable because TED's API and
+1.45 million rows. Retention is now a written policy over archives, reports,
+logs and Airflow metadata, with no command that deletes any of them. There is
+no publication calendar and no parallelism. Historical completeness and cloud
+execution have not been demonstrated, orchestration has only ever run on one
+local host, and one 2021 package remains unverifiable because TED's API and
 TED's monthly archive disagree about it.
 Source artifacts and database volumes stay outside Git. Synthetic fixtures test
 correctness and failures; they do not count toward the real-data scale target.

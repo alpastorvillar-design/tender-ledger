@@ -35,9 +35,13 @@ docker compose up -d --wait postgres
 docker compose exec -T postgres psql -U postgres -d tender_ledger -v ON_ERROR_STOP=1 -c "SELECT version(), current_database();"
 ```
 
-The helper creates a random password in the ignored `.env` file and preserves an
-existing file. Do not commit or print that file. Avoid sharing the expanded output
-of `docker compose config`, which includes environment values; use `--quiet`.
+The helper writes the settings the local stack needs into the ignored `.env`
+file, adding only the ones that are not there yet and never rewriting an
+existing value. Do not commit or print that file. Avoid sharing the expanded
+output of `docker compose config`, which includes environment values; use
+`--quiet`. The Airflow settings it also creates are only used by the optional
+[orchestration stack](orchestration.md); `compose.yaml` on its own needs
+`POSTGRES_PASSWORD` and `POSTGRES_PORT`.
 
 The database listens on `127.0.0.1:5433` on the host. Change `POSTGRES_PORT` in
 `.env` if that port is already occupied. The `postgres` account is the local
@@ -63,6 +67,9 @@ docker compose start postgres
 `docker compose down` removes the container and network while retaining the named
 volume. Adding `--volumes` deletes the database, so it is not part of routine
 cleanup. The service does not restart automatically after a host reboot.
+
+The optional Airflow stack is a separate overlay file and never changes these
+commands; see [local orchestration](orchestration.md).
 
 ## Runtime verification
 

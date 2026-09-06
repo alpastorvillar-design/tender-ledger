@@ -2,9 +2,10 @@
 
 Status: implemented for one package at a time, daily or monthly. `ingest`
 acquires the archive over HTTPS, loads it with the transactional loader, verifies
-its coverage against the Search API, and seals a checkpoint. A publication
-calendar, backfill over several packages, benchmarks and Airflow are later
-slices. No monthly package has been acquired from TED yet: monthly support is
+its coverage against the Search API, and seals a checkpoint. Backfill over
+several packages is [`ingest-manifest`](backfill.md), and scheduling one of
+those runs is [local orchestration](orchestration.md); a publication calendar
+is still a later slice. No monthly package has been acquired from TED yet: monthly support is
 covered by fixtures and local servers, not by a real download.
 
 ```sh
@@ -306,9 +307,8 @@ views and nothing else.
 
 ## Deliberately not done here
 
-More than one package per invocation, a publication calendar, retention of old
-artifacts, the 100,000-notice rehearsal, the million-notice gate, the measured
-SQL workload, and Airflow. `ingest` processes one named package and says
+More than one package per invocation, a publication calendar, deleting old
+artifacts, and scheduling. `ingest` processes one named package and says
 whether that package is processed. [`ingest-manifest`](backfill.md) composes
 this same command over a fixed, ordered list of packages -- it adds no second
 recovery mechanism, only sequencing and a report.
