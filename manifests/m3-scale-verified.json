@@ -1,0 +1,213 @@
+{
+  "manifest_version": 1,
+  "packages": [
+    {
+      "order": 1,
+      "source_package_id": "monthly/2020-01",
+      "notice_count_observed": 50123,
+      "compressed_bytes_observed": 139301298,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 2,
+      "source_package_id": "monthly/2020-02",
+      "notice_count_observed": 50522,
+      "compressed_bytes_observed": 139008562,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 3,
+      "source_package_id": "monthly/2020-03",
+      "notice_count_observed": 53785,
+      "compressed_bytes_observed": 152083559,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 4,
+      "source_package_id": "monthly/2020-04",
+      "notice_count_observed": 49106,
+      "compressed_bytes_observed": 136802477,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 5,
+      "source_package_id": "monthly/2020-05",
+      "notice_count_observed": 49130,
+      "compressed_bytes_observed": 137241714,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 6,
+      "source_package_id": "monthly/2020-06",
+      "notice_count_observed": 52655,
+      "compressed_bytes_observed": 152343689,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 7,
+      "source_package_id": "monthly/2020-07",
+      "notice_count_observed": 56815,
+      "compressed_bytes_observed": 190864114,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 8,
+      "source_package_id": "monthly/2020-08",
+      "notice_count_observed": 46159,
+      "compressed_bytes_observed": 151746715,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 9,
+      "source_package_id": "monthly/2020-09",
+      "notice_count_observed": 51908,
+      "compressed_bytes_observed": 150645131,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 10,
+      "source_package_id": "monthly/2020-10",
+      "notice_count_observed": 60553,
+      "compressed_bytes_observed": 193487899,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 11,
+      "source_package_id": "monthly/2020-11",
+      "notice_count_observed": 55891,
+      "compressed_bytes_observed": 176052593,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 12,
+      "source_package_id": "monthly/2020-12",
+      "notice_count_observed": 66905,
+      "compressed_bytes_observed": 189123365,
+      "observed_at": "2026-09-06",
+      "purpose": "2020 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 13,
+      "source_package_id": "monthly/2021-01",
+      "notice_count_observed": 48745,
+      "compressed_bytes_observed": 149455356,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 14,
+      "source_package_id": "monthly/2021-02",
+      "notice_count_observed": 52821,
+      "compressed_bytes_observed": 160049440,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 15,
+      "source_package_id": "monthly/2021-03",
+      "notice_count_observed": 60007,
+      "compressed_bytes_observed": 159877893,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 16,
+      "source_package_id": "monthly/2021-04",
+      "notice_count_observed": 57027,
+      "compressed_bytes_observed": 157628825,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 17,
+      "source_package_id": "monthly/2021-06",
+      "notice_count_observed": 57249,
+      "compressed_bytes_observed": 156789991,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 18,
+      "source_package_id": "monthly/2021-07",
+      "notice_count_observed": 60135,
+      "compressed_bytes_observed": 173822707,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 19,
+      "source_package_id": "monthly/2021-08",
+      "notice_count_observed": 50940,
+      "compressed_bytes_observed": 166513275,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 20,
+      "source_package_id": "monthly/2021-09",
+      "notice_count_observed": 52241,
+      "compressed_bytes_observed": 143794686,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 21,
+      "source_package_id": "monthly/2021-10",
+      "notice_count_observed": 64540,
+      "compressed_bytes_observed": 208632553,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 22,
+      "source_package_id": "monthly/2021-11",
+      "notice_count_observed": 54768,
+      "compressed_bytes_observed": 176157596,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 23,
+      "source_package_id": "monthly/2021-12",
+      "notice_count_observed": 64217,
+      "compressed_bytes_observed": 180661452,
+      "observed_at": "2026-09-06",
+      "purpose": "2021 monthly slice toward the million-notice gate"
+    },
+    {
+      "order": 24,
+      "source_package_id": "monthly/2023-11",
+      "notice_count_observed": 61638,
+      "compressed_bytes_observed": 250854274,
+      "observed_at": "2026-09-06",
+      "purpose": "expected real overlap with the accepted daily package"
+    },
+    {
+      "order": 25,
+      "source_package_id": "monthly/2024-01",
+      "notice_count_observed": 65708,
+      "compressed_bytes_observed": 291615691,
+      "observed_at": "2026-09-06",
+      "purpose": "eForms monthly"
+    },
+    {
+      "order": 26,
+      "source_package_id": "daily/202300220",
+      "notice_count_observed": 2967,
+      "compressed_bytes_observed": 12377691,
+      "observed_at": "2026-09-06",
+      "purpose": "already-accepted mixed daily package"
+    }
+  ]
+}

@@ -4,19 +4,24 @@ Status: a versioned manifest format and a sequential runner over `ingest`
 exist and are tested against fixtures and a local server. Two real manifests
 have been run end to end under projection contract v3: the five identities of
 `manifests/m3-pilot.json` (see [measured-rehearsal.md](measured-rehearsal.md))
-and the twenty-seven of `manifests/m3-scale.json` (see
-[million-notice-run.md](million-notice-run.md)). Twenty-six of the twenty-seven
-have an exact verified checkpoint and replay without HTTP or new durable state;
-the twenty-seventh stops the run, because the source cannot confirm its
-coverage. Listing an identity in a manifest is still not evidence it was
+and the twenty-six of `manifests/m3-scale-verified.json` (see
+[million-notice-run.md](million-notice-run.md)). All have exact checkpoints and
+replay without HTTP or new durable state. The companion 27-entry
+`manifests/m3-scale.json` retains the source audit; its seventeenth entry stops
+the run because the source cannot confirm that package's coverage. Listing an
+identity in a manifest is still not evidence it was
 downloaded, loaded or verified. That evidence is in
 `tl_read.package_ingest_status` and in a report the command wrote, not in the
 manifest file.
 
 ```sh
-python -m tender_ledger ingest-manifest --manifest manifests/m3-scale.json
-python -m tender_ledger ingest-manifest --manifest manifests/m3-scale.json --report report.json
+python -m tender_ledger ingest-manifest --manifest manifests/m3-scale-verified.json
+python -m tender_ledger ingest-manifest --manifest manifests/m3-scale-verified.json --report report.json
 ```
+
+Use `manifests/m3-scale.json` when reproducing the source disagreement as a
+fail-closed audit. It stops at `monthly/2021-05`; the verified manifest excludes
+only that package and records the successful scale slice.
 
 Exit code 0 means every package in the manifest reported a current, processed
 or replayed checkpoint, in order. Any other outcome exits 1.
@@ -151,7 +156,8 @@ Parallelism, date-range or calendar-driven manifest generation, a global
 retry across packages, a manifest-execution table, and any flag that would
 relax the resource budgets `ingest` already enforces per package. There is also
 no way to skip an entry: a manifest whose source cannot confirm one package
-stops there, and continuing past it means running a manifest that does not name
-it. The million-notice gate, storage measurements and SQL benchmark are
+stops there. The verified scale manifest is a separate, explicit source
+selection that omits the documented mismatch; the runner never skips it
+implicitly. The million-notice gate, storage measurements and SQL benchmark are
 complete; the 2020-2025 historical run remains a later slice. See
 [scale-and-sql.md](scale-and-sql.md).

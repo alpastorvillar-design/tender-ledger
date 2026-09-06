@@ -7,10 +7,11 @@ canonical notices** whose coverage the source confirmed. Counting every publishe
 capture, including the one package the source itself cannot reconcile, the
 database holds **1,450,598 observations and 1,447,631 distinct notices**.
 
-The twenty-seventh package, `monthly/2021-05`, has no checkpoint and cannot get
-one: TED's own Search API reports one notice that TED's own monthly archive for
-that month does not contain. That is a measured gap in the source, reproduced
-twice, and it is described in full below.
+The seventeenth entry, `monthly/2021-05`, has no checkpoint and cannot get one:
+TED's own Search API reports one notice that TED's own monthly archive for that
+month does not contain. That is a measured gap in the source, reproduced twice
+and confirmed by a separate probe on 2026-09-06, and it is described in full
+below.
 
 The run used an exclusive `tender_ledger_m3_scale` database. The development
 database was unchanged before and after: one capture, 2,967 notices, one run,
@@ -21,20 +22,24 @@ one checkpoint.
 Windows 11 Pro, AMD Ryzen 7 7800X3D (16 logical processors host-side), 31.1 GiB
 RAM. PostgreSQL 17.11 in the project's Compose stack, limited to 2 CPU and
 2 GiB. Python 3.14.3. The host held more than 620 GiB free throughout, above the
-100 GiB operating gate, and the project's combined footprint peaked at 8.6 GiB
+100 GiB operating gate, and the project's combined footprint peaked at 13.44 GiB
 against the 150 GiB ceiling.
 
 ## Reproducing the gate
 
 ```sh
-python -m tender_ledger ingest-manifest --manifest manifests/m3-scale.json --report report.json
+python -m tender_ledger ingest-manifest --manifest manifests/m3-scale-verified.json --report report.json
 ```
 
-The manifest names 27 package identities in a fixed order: the 24 monthly
-packages of 2020 and 2021, then `monthly/2023-11` and `monthly/2024-01` for
-eForms coverage, then `daily/202300220`, which overlaps November 2023. Its
-counts and bytes are planning metadata observed on 2026-09-06; nothing
-downstream reads them.
+The verified manifest names the 26 identities with exact checkpoints. The
+companion [`m3-scale.json`](../manifests/m3-scale.json) retains all 27 package
+identities in a fixed order: the 24 monthly packages of 2020 and 2021, then
+`monthly/2023-11` and `monthly/2024-01` for eForms coverage, then
+`daily/202300220`, which overlaps November 2023. Its counts and bytes are
+planning metadata observed on 2026-09-06; nothing downstream reads them. The
+audit manifest deliberately keeps `monthly/2021-05` and therefore stops at
+entry 17. The verified manifest excludes only that documented mismatch; the
+runner itself never skips an entry.
 
 The gate itself is a count over the read surface, not over physical rows:
 
@@ -56,10 +61,11 @@ The second query is the one that answers the gate as
 [scale-and-sql.md](scale-and-sql.md) states it: distinct real notices whose
 coverage was reconciled against the source.
 
-This run processed the manifest in private three-package slices so resources
-could be measured between them and the run could stop and resume. Each slice was
-a valid manifest of its own with `order` renumbered; running the public manifest
-in one call performs the same work, and a second call replays it.
+This run processed the source-audit manifest in private three-package slices so
+resources could be measured between them and the run could stop and resume.
+Each slice was a valid manifest of its own with `order` renumbered. The complete
+verified manifest provides the reproducible start-to-finish path over every
+package whose coverage is exact.
 
 ## Recovery under interruption
 
@@ -169,13 +175,15 @@ entry 17 and always will while the source disagrees with itself.
 
 ## Replay
 
-Replay was measured in two parts because of that stop.
+The source-audit replay was measured in two parts because of that stop. A
+separate run of the verified manifest exercises all 26 checkpoints in one call.
 
 | Run | Entries | Outcome | Acquisition requests | Bytes | Seconds |
 | --- | ---: | --- | ---: | ---: | ---: |
 | Public manifest, entries 1-16 | 16 | all `replayed` | 0 | 0 | 844.4 |
 | Public manifest, entry 17 | 1 | `incomplete`, stops the run | 0 | 0 | (included) |
 | Slices covering entries 18-27 | 10 | all `replayed` | 0 | 0 | 388.4 |
+| Verified manifest | 26 | all `replayed`, exit 0 | 0 | 0 | 740.8 |
 
 Twenty-six of twenty-seven entries replay: each re-validates its stored artifact
 and accepts the existing checkpoint without a single acquisition request. Durable
@@ -184,9 +192,13 @@ entry 17 legitimately re-checking the coverage that failed, which queried the AP
 over 218 pages and failed again the same way. No new capture, run, batch,
 checkpoint or notice row was created by either replay.
 
-Revalidating 4.14 GiB of archives is not free: the sixteen-entry replay took
-844 seconds and peaked at 145.5 MB of process memory. Replay is cheap compared
-with loading, not costless.
+The complete verified-manifest replay left all durable counts and the WAL
+position unchanged, including 28 verification attempts before and after. Its
+26 report entries each carry `http_attempts = 0` and `downloaded_bytes = 0`.
+
+Revalidating 4.14 GiB of archives is not free: the first sixteen entries alone
+took 844 seconds and peaked at 145.5 MB of process memory. Replay is cheap
+compared with loading, not costless.
 
 ## Scale and overlap
 
@@ -209,13 +221,12 @@ superseded.
 | Measure | Value |
 | --- | ---: |
 | Compressed artifacts on disk | 4,446,120,792 B (4.14 GiB) |
-| Scale database | 439,350,963 B |
+| Scale database | 439,580,339 B |
 | `tl_work.notice_capture` heap / indexes | 318,251,008 B / 109,789,184 B |
-| PostgreSQL data directory | 1,061,284,237 B |
-| PostgreSQL WAL directory | 134,230,016 B |
-| Temporary files written by this database | 935 files, 2,225,676,288 B |
-| Docker VHDX | 4,798,283,776 B |
-| Host free space at the end | 626.2 GiB |
+| PostgreSQL data directory | 2,509,373,509 B |
+| Temporary I/O recorded by the scale database | 4,532 files, 34,568,675,036 B cumulative |
+| Docker VHDX | 9,982,443,520 B (9.30 GiB) |
+| Host free space at the end | 634.8 GiB |
 | Peak loader process memory | 179.6 MB |
 
 Time splits into acquisition 1,179.8 s, loading 1,231.0 s and source verification
@@ -227,7 +238,10 @@ request per 250 notices.
 
 Database growth is modest — about 303 bytes per distinct notice including
 indexes — so at this scale storage is dominated by the compressed archives, not
-by PostgreSQL.
+by PostgreSQL. The temporary-byte counter is cumulative I/O rather than retained
+disk usage. The VHDX nevertheless grew as the benchmark and partitioning work
+spilled and does not shrink automatically, which is why host footprint and
+logical dataset size are reported separately.
 
 ## SQL benchmark at 1.45 million rows
 
@@ -303,14 +317,17 @@ API-reported notices of the historical target:
 | --- | ---: | ---: |
 | Database bytes per distinct notice | 303.5 | 1.28 GiB total |
 | Compressed archive bytes per distinct notice | 3,071.3 | 15.63 GiB total (header inventory) |
-| Combined footprint | 8.6 GiB | 16.9 GiB, 25.4 GiB with a 50% margin |
+| Logical artifacts plus scale database | 4.55 GiB | 16.9 GiB, 25.4 GiB with a 50% margin |
+| Current host footprint: artifacts plus Docker VHDX | 13.44 GiB | Not projected; the VHDX also contains other local databases, benchmark spill history and engine overhead |
 | Seconds per monthly package | 311.4 | 6.2 h, 9.3 h with a 50% margin |
 | Loading throughput | 1,178 notices/s | — |
 | Share of time spent verifying | 73.9% | — |
 
 Neither storage nor time is the obstacle: the projection sits far under the
-150 GiB operating ceiling and inside a single long session, and no artifact
-retention policy is needed to fit. Two caveats belong with those numbers. The
+150 GiB operating ceiling and inside a single long session. Capacity does not
+force artifact deletion, although the historical run still needs an explicit
+retention policy for repeatability and local disk management. Two caveats
+belong with those numbers. The
 rates come from 2020 and 2021, and later years are larger per package, so the
 time estimate is optimistic. And verification cost is set by the source — one
 request per 250 notices — so a slower API moves the wall clock and nothing else.
@@ -324,8 +341,8 @@ and it is the prerequisite for the historical run rather than more hardware.
 
 ## What this run does not establish
 
-- Complete 2020-2025 historical coverage; 27 of 72 monthly packages are loaded,
-  and one of those is unverified.
+- Complete 2020-2025 historical coverage; 26 of 72 monthly packages are loaded,
+  one of those is unverified, and one additional daily package is loaded.
 - That the source is internally consistent. One package proves it is not.
 - Production orchestration, distributed processing or cloud operation.
 - Performance on other hardware, or under concurrency: every measurement here is

@@ -106,6 +106,22 @@ class ValidManifestTests(unittest.TestCase):
             [e.order for e in manifest.entries], list(range(1, len(identities) + 1))
         )
 
+    def test_the_verified_scale_manifest_excludes_only_the_known_source_gap(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        full = load_manifest(repo_root / "manifests" / "m3-scale.json")
+        verified = load_manifest(repo_root / "manifests" / "m3-scale-verified.json")
+        full_ids = [entry.source_package_id for entry in full.entries]
+        verified_ids = [entry.source_package_id for entry in verified.entries]
+
+        self.assertEqual(
+            verified_ids,
+            [package_id for package_id in full_ids if package_id != "monthly/2021-05"],
+        )
+        self.assertEqual(
+            [entry.order for entry in verified.entries],
+            list(range(1, len(verified_ids) + 1)),
+        )
+
 
 class InvalidJsonTests(unittest.TestCase):
     def test_malformed_json_text_is_rejected(self):
